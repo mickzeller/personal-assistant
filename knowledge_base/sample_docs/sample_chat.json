@@ -1,0 +1,20 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "What's the difference between LoRA and QLoRA for fine-tuning?"
+    },
+    {
+      "role": "assistant",
+      "content": "LoRA (Low-Rank Adaptation) adds small trainable adapter matrices to a frozen base model. Instead of updating all parameters, you only train these small adapters — typically 0.1-1% of the total parameters. This dramatically reduces memory and compute requirements.\n\nQLoRA takes this a step further by quantizing the base model to 4-bit precision before applying LoRA adapters. The adapters themselves are still trained in full precision (fp16/bf16), but the frozen base model takes up much less memory. On a practical level, QLoRA lets you fine-tune a 7B parameter model on a single 12-16GB GPU, where regular LoRA might need 24GB+.\n\nThe quality difference between LoRA and QLoRA is minimal — studies show QLoRA achieves ~95-99% of full fine-tuning quality. The main trade-off is slightly slower training due to the quantization/dequantization overhead."
+    },
+    {
+      "role": "user",
+      "content": "So if I have a Mac with 64GB unified memory, which should I use?"
+    },
+    {
+      "role": "assistant",
+      "content": "With 64GB unified memory on Apple Silicon, you're in a great position. For MLX-based fine-tuning on your Mac, you'd typically use standard LoRA rather than QLoRA, because MLX handles memory differently than CUDA. Your 64GB of unified memory is shared between CPU and GPU with zero-copy access, so you don't have the same VRAM constraints that make QLoRA necessary on NVIDIA GPUs.\n\nFor an 8B model, standard LoRA via MLX will comfortably fit in your 64GB with room to spare. You might only need QLoRA if you're trying to fine-tune a much larger model, like a 30B+ parameter model, where even 64GB gets tight."
+    }
+  ]
+}

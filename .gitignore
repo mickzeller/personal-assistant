@@ -1,0 +1,47 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Local data — ChromaDB, training datasets, conversation logs
+# NEVER commit this directory (contains personal data + embeddings)
+data/
+
+# Knowledge base — ONLY sample_docs/ gets committed
+# Everything else (your personal files, Claude exports, training data) stays local.
+# The rule: knowledge_base/* ignores everything, then !sample_docs/ un-ignores that one folder.
+# Verify with: git add --dry-run .
+knowledge_base/*
+!knowledge_base/sample_docs/
+
+# Environment variables & secrets
+.env
+.env.*
+*.key
+*.pem
+credentials.*
+secrets.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Model files (too large for git)
+*.gguf
+*.bin
+*.safetensors
