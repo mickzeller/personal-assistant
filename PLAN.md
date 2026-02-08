@@ -5,12 +5,12 @@
 | Phase | Status | Summary |
 |-------|--------|---------|
 | **Phase 1:** Foundation | **Complete** | Ollama running, models pulled, Python project scaffolded, chat interface built |
-| **Phase 2:** RAG Pipeline | **Complete** | Ingestion (.md/.txt/.pdf/.json/.jsonl + Claude exports), ChromaDB (7,357 chunks), two-stage retrieval w/ reranking, chat integration |
-| **Phase 3:** Fine-Tuning | Not started | MLX LoRA on Llama 3.1 8B — next up |
+| **Phase 2:** RAG Pipeline | **Complete** | Ingestion (.md/.txt/.pdf/.json/.jsonl/.docx + Claude exports), ChromaDB (7,357 chunks), two-stage retrieval w/ reranking, chat integration, conversation logging, security hardening |
+| **Phase 3:** Fine-Tuning | **In Progress** | Training data collection started — 83 writing-style examples extracted from Perplexity exports + Slack messages. MLX LoRA fine-tuning next. |
 | **Phase 4:** UI Polish | Not started | Gradio web interface (installed, not built yet) |
 | **Phase 5:** Advanced | Not started | DPO training, tool use, web search, multi-modal |
 
-> Last updated: Feb 2025
+> Last updated: Feb 2026
 
 ## Table of Contents
 - [0. Hardware Profile](#0-hardware-profile)
@@ -25,7 +25,7 @@
 
 ## 0. Hardware Profile
 
-> **Last updated:** 2025-02-06
+> **Last updated:** 2026-02-06
 
 ### Primary Machine: MacBook Pro M4 Max (64GB Unified Memory)
 
@@ -909,11 +909,12 @@ With a 128K context model, budget your tokens wisely:
 │  │              │◄────│  3. Build prompt with retrieved context   │  │
 │  │  Slash cmds: │     │  4. Stream response from Ollama          │  │
 │  │  /rag /model │     │  5. Update conversation history          │  │
-│  │  /sources    │     │                                          │  │
-│  │  /clear /help│     │  Models available via /model:             │  │
+│  │  /sources    │     │  6. Log exchange for future fine-tuning   │  │
+│  │  /clear /log │     │                                          │  │
+│  │  /help /quit │     │  Models available via /model:             │  │
 │  └─────────────┘     │  • llama3.1:8b-instruct-q8_0 (default)   │  │
 │                       │  • gemma3:27b (daily driver)              │  │
-│                       │  • Any model in Ollama                    │  │
+│                       │  • Any model in Ollama (validated)        │  │
 │                       └──────────┬──────────┬────────────────────┘  │
 │                                  │          │                       │
 │                    ┌─────────────▼──┐  ┌────▼─────────────────┐    │
@@ -943,7 +944,7 @@ With a 128K context model, budget your tokens wisely:
 │                                                                     │
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │  KNOWLEDGE BASE — knowledge_base/                               │ │
-│  │  Supported: .md .txt .pdf .json .jsonl                          │ │
+│  │  Supported: .md .txt .pdf .json .jsonl .docx                    │ │
 │  │                                                                 │ │
 │  │  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐   │ │
 │  │  │ Personal│  │ Documents│  │   PDFs   │  │ Chat logs     │   │ │
@@ -952,6 +953,21 @@ With a 128K context model, budget your tokens wisely:
 │  │                                                                 │ │
 │  │  Pipeline: Load → Chunk (512ch/50 overlap) → Embed → ChromaDB  │ │
 │  │  JSON chat logs auto-convert to readable text before chunking   │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  TRAINING DATA PIPELINE                                        │ │
+│  │                                                                 │ │
+│  │  src/conversation_logger.py     src/training_data_parser.py    │ │
+│  │  ┌──────────────────────┐       ┌──────────────────────────┐   │ │
+│  │  │ Auto-logs every chat │       │ Parses Perplexity MD,    │   │ │
+│  │  │ session → JSONL      │       │ DOCX, plain MD → MLX     │   │ │
+│  │  │ data/conversations/  │       │ chat JSONL format         │   │ │
+│  │  └──────────┬───────────┘       └────────────┬─────────────┘   │ │
+│  │             │                                │                  │ │
+│  │             ▼                                ▼                  │ │
+│  │  data/conversations/*.jsonl     data/training/writing_style.jsonl│ │
+│  │  (future fine-tuning data)      (83 examples, ready for MLX)   │ │
 │  └────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -996,9 +1012,10 @@ With a 128K context model, budget your tokens wisely:
 | File Type | Loader | Status | Notes |
 |-----------|--------|--------|-------|
 | `.md`, `.txt`, `.markdown` | `load_text_file()` | **Working** | Direct text read, UTF-8 |
-| `.pdf` | `load_pdf_file()` via [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | **Working** | Page-by-page extraction with page numbers in metadata |
+| `.pdf` | `load_pdf_file()` via [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | **Working** | Page-by-page extraction with page numbers in metadata; uses context manager for resource safety |
 | `.json` | `load_json_file()` | **Working** | Smart auto-detection — see Claude export support below |
 | `.jsonl` | `load_json_file()` | **Working** | One JSON object per line — common export format for chat logs and training data |
+| `.docx` | `load_docx_file()` via [python-docx](https://github.com/python-openxml/python-docx) | **Working** | Extracts paragraphs from Word documents — used for Slack exports and other formatted writing |
 
 **Claude Export Support (auto-detected):**
 
@@ -1019,7 +1036,6 @@ Large files are embedded and stored in batches of 500 chunks to stay within Chro
 |----------|------|---------|
 | **Code Parsing** | [tree-sitter](https://github.com/tree-sitter/tree-sitter) | AST-aware code chunking (split by function/class instead of character count) |
 | **Web Scraping** | [Trafilatura](https://github.com/adbar/trafilatura) | Clean text extraction from web pages |
-| **Word Docs** | [python-docx](https://github.com/python-openxml/python-docx) | `.docx` support — already installed as a dependency |
 | **CSV/Excel** | pandas | Structured data ingestion |
 
 ---
@@ -1084,6 +1100,12 @@ Don't try to build the perfect system from day one. Each phase should produce so
 - [x] Batched upserts for large files (500 chunks/batch) — handles 7,000+ chunk files
 - [x] Ingested personal Claude data: 331 conversations + memories + projects → **7,357 total chunks**
 - [x] Verified retrieval works against real personal content (Spartan/LSRA bug, work context from memories)
+- [x] Added `.docx` ingestion support via python-docx
+- [x] Built conversation logger — auto-saves chat sessions to `data/conversations/` as JSONL for future fine-tuning
+- [x] Built training data parser — extracts writing style examples from Perplexity exports, Slack messages, and reviews
+- [x] Created `CHEATSHEET.md` — quick reference for all project commands
+- [x] Security hardening — PDF resource leak fix, stream error handling, model validation, Ollama connectivity check, path traversal guard, silent logger failure
+- [x] First git commit (b6d1dad) — 18 files, 4,232 insertions
 - [ ] Re-evaluate on personal eval set — how much did RAG help vs. base model?
 
 **What was built:**
@@ -1091,10 +1113,13 @@ Don't try to build the perfect system from day one. Each phase should produce so
 | Module | File | Purpose |
 |--------|------|---------|
 | Embeddings | `src/embeddings.py` | Wraps Ollama's nomic-embed-text with search_document/search_query prefixes |
-| Ingestion | `src/ingest.py` | Load → chunk → embed → store pipeline for .md/.txt/.pdf/.json/.jsonl |
+| Ingestion | `src/ingest.py` | Load → chunk → embed → store pipeline for .md/.txt/.pdf/.json/.jsonl/.docx |
 | Retrieval | `src/retriever.py` | Two-stage: ChromaDB semantic search (top 10) → cross-encoder rerank (top 5) |
-| Chat | `src/chat.py` | Orchestrates RAG + Ollama chat with streaming, conversation history, slash commands |
+| Chat | `src/chat.py` | Orchestrates RAG + Ollama chat with streaming, conversation history, slash commands, `/log` command |
 | Config | `configs/config.py` | All settings in one place — models, chunk sizes, retrieval params, prompts |
+| Conversation Logger | `src/conversation_logger.py` | Auto-logs chat sessions to JSONL files in `data/conversations/` for future fine-tuning |
+| Training Data Parser | `src/training_data_parser.py` | Converts Perplexity exports, DOCX files, and plain MD into MLX chat fine-tuning format |
+| Cheat Sheet | `CHEATSHEET.md` | Quick-reference for all project commands and structure |
 
 **Key design decisions:**
 - Used Ollama's Python client for embeddings (not sentence-transformers directly) — keeps one consistent interface since Ollama already manages our models
@@ -1105,22 +1130,42 @@ Don't try to build the perfect system from day one. Each phase should produce so
 - Assistant "thinking" preamble filtered out of conversations — internal reasoning (e.g., "The user wants to...") pollutes embeddings without adding retrievable knowledge
 - Batched embedding + storage — processes large files in 500-chunk batches to stay within ChromaDB limits and keep memory manageable
 - PII-aware — `users.json` auto-skipped by filename since it contains email/phone
+- Conversation logging is silent — `_write_entry()` catches OSError so logging never crashes the chat
+- Training data parser uses 7+ extraction patterns to handle Perplexity's varied formatting (blockquotes, code blocks, bold quotes, bullet lists, etc.)
+- Quality filter on training data — removes examples < 20 chars or > 4,000 chars
+- Security fixes: PDF context managers, path traversal guards with `resolve()`, Ollama connectivity check at startup, model validation before switching, stream error handling
 
-**Deliverable:** A working RAG-powered assistant loaded with 7,357 chunks of personal knowledge from Claude conversations, memories, projects, and reference docs.
+**Deliverable:** A working RAG-powered assistant loaded with 7,357 chunks of personal knowledge from Claude conversations, memories, projects, and reference docs. Plus conversation logging for future fine-tuning data accumulation.
 
-**Status:** Complete. Personal data ingested and verified working.
+**Status:** Complete. Personal data ingested and verified working. Conversation logger and training data parser built and committed.
 
 ---
 
-### Phase 3: Fine-Tuning (Week 4-8)
+### Phase 3: Fine-Tuning (Week 4-8) — IN PROGRESS
 **Goal: Make the model behave more like your ideal assistant**
 
+**Training Data Collection (started):**
+- [x] Built training data parser (`src/training_data_parser.py`) — extracts writing style examples from multiple formats
+- [x] Exported 52 Perplexity conversation threads (SMS drafting, email writing, message crafting)
+- [x] Added Slack message history (DOCX format) — casual humor and phrasing
+- [x] Added Google reviews and other writing samples (plain MD)
+- [x] Renamed all 69 training files with descriptive kebab-case names for easy scanning
+- [x] Extracted **83 writing style examples** → `data/training/writing_style.jsonl` (MLX chat format)
+- [x] Conversation logger (`src/conversation_logger.py`) auto-collects future exchanges for fine-tuning
+- [ ] **Collect more writing samples** — goal: 200-500 custom examples (currently at 83)
+  - More Perplexity threads (SMS, email, message drafting)
+  - Old texts, emails, or social media posts
+  - Church/ministry communications
+  - Work messages (Slack, Teams, ticket comments)
+- [ ] Optional: use a frontier model to generate variations from your best examples (seed expansion)
+
+**HHH Alignment Data:**
+- [ ] Download and preprocess Anthropic HH-RLHF, OASST2, UltraFeedback
+- [ ] Mix and balance with your writing style examples
+
+**Fine-Tuning Pipeline:**
 - [ ] Set up MLX fine-tuning environment on your Mac (`pip install mlx mlx-lm`)
-- [ ] Curate your training dataset:
-  - [ ] Download and preprocess Anthropic HH-RLHF, OASST2, UltraFeedback
-  - [ ] Create 200-500 custom examples of YOUR ideal interaction style
-  - [ ] Mix and balance the datasets
-  - [ ] Format as JSONL (MLX's expected format)
+- [ ] Format combined dataset as JSONL (MLX's expected format) — writing style data already in this format
 - [ ] Run your first LoRA fine-tuning job via MLX on Llama 3.1 8B
   - Start with a small subset (1-2K examples) to validate the pipeline works
   - Then scale up to your full dataset
@@ -1132,7 +1177,17 @@ Don't try to build the perfect system from day one. Each phase should produce so
 - [ ] Optional: try the same process on your PC via Unsloth + CUDA (if 3060 Ti fits)
 - [ ] Optional: try fine-tuning on cloud A100 if you want to push to larger models
 
-**Deliverable:** A fine-tuned model that follows instructions better, is more aligned with your preferences, and feels more "Claude-like."
+**What's already built for this phase:**
+
+| Component | File | Status |
+|-----------|------|--------|
+| Training data parser | `src/training_data_parser.py` | **Working** — handles Perplexity MD, DOCX, plain MD formats |
+| Writing style JSONL | `data/training/writing_style.jsonl` | **83 examples** in MLX chat format |
+| Extraction stats | `data/training/stats.json` | Breakdown by source and quality metrics |
+| Conversation logger | `src/conversation_logger.py` | **Working** — accumulating data with every chat session |
+| Training data files | `knowledge_base/training_data/` | **69 files** — descriptively named, ready for re-parsing |
+
+**Deliverable:** A fine-tuned model that matches your writing style, follows instructions better, and feels like a natural extension of how you communicate.
 
 **Time estimate:** 15-30 hours (faster than original estimate — MLX on M4 Max is quick, and you have more iteration headroom)
 
@@ -1204,7 +1259,7 @@ if you want to fine-tune a 70B model (cloud) or upgrade the PC GPU
 
 ## Quick-Start Checklist
 
-> **Status: Phase 1 & 2 are complete.** The assistant is built and working.
+> **Status: Phase 1 & 2 complete. Phase 3 in progress** (training data collection started — 83 writing style examples ready).
 > If you're coming back to this after a break, here's how to pick up where we left off.
 
 ```bash
@@ -1230,8 +1285,9 @@ python -m src.chat --no-rag
 | Command | What It Does |
 |---------|-------------|
 | `/rag on\|off` | Toggle RAG retrieval on or off |
-| `/model gemma3:27b` | Switch to a different Ollama model mid-conversation |
+| `/model gemma3:27b` | Switch to a different Ollama model mid-conversation (validates model exists) |
 | `/sources` | Show what's in the knowledge base (files and chunk counts) |
+| `/log` | Show current session log file, exchange count, and total sessions |
 | `/clear` | Clear conversation history (start fresh) |
 | `/help` | Show all available commands |
 | `/quit` | Exit the chat |
@@ -1245,10 +1301,31 @@ python -m src.chat --no-rag
 | `gemma3:27b` | **Installed** | Daily driver — use `/model gemma3:27b` for stronger reasoning |
 | `qwen2.5:72b-instruct-q4_K_M` | Optional | Maximum capability — fits on M4 Max 64GB |
 
-### Next: Preparing for Fine-Tuning (Phase 3)
+### Training Data (Phase 3 — In Progress)
 
 ```bash
-# Install MLX for fine-tuning on your Mac (when you're ready for Phase 3)
+# Parse training data from knowledge_base/training_data/ → JSONL for fine-tuning
+python -m src.training_data_parser
+
+# Output goes to: data/training/writing_style.jsonl (83 examples so far)
+# Stats in: data/training/stats.json
+```
+
+### Conversation Logs (Auto-Collected)
+
+Every chat session auto-saves to `data/conversations/`. These accumulate future fine-tuning data.
+
+```bash
+# View recent conversation logs
+ls -lt data/conversations/
+
+# Use /log inside the chat to see session stats
+```
+
+### Next: MLX Fine-Tuning Setup
+
+```bash
+# Install MLX for fine-tuning on your Mac (when you're ready)
 pip install mlx mlx-lm
 ```
 

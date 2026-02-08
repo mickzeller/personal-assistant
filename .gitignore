@@ -45,3 +45,7 @@ Thumbs.db
 *.gguf
 *.bin
 *.safetensors
+
+# Fine-tuning artifacts (adapters contain config JSONs + weights)
+adapters/
+models/

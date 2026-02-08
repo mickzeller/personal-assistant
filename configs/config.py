@@ -94,6 +94,119 @@ class RetrievalConfig(BaseSettings):
     collection_name: str = "personal_knowledge"
 
 
+class FineTuneConfig(BaseSettings):
+    """
+    LoRA fine-tuning configuration for MLX on Apple Silicon.
+
+    WHY THESE VALUES:
+    ─────────────────
+    With only 83 training examples, we're in "tiny dataset" territory.
+    Every knob here is tuned to PREVENT OVERFITTING while still learning
+    Mick's writing style. Think of it as teaching with a light touch —
+    we want the model to pick up tone and phrasing patterns without
+    memorizing specific sentences.
+
+    The base model is a pre-quantized 4-bit Llama 3.1 8B from the
+    mlx-community — no conversion needed, it's ready to train.
+    """
+
+    # ── Model ──────────────────────────────────────────────────
+    # Pre-quantized MLX model from HuggingFace (downloads ~4.5GB on first run)
+    # Using 4-bit keeps memory usage low and training fast on M4 Max
+    base_model: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+
+    # The Ollama model name we'll create after fine-tuning
+    ollama_model_name: str = "llama3.1-mick:latest"
+
+    # Ollama base model for Modelfile (used for direct adapter import)
+    ollama_base_model: str = "llama3.1:8b-instruct-q8_0"
+
+    # ── LoRA Hyperparameters ───────────────────────────────────
+    # Rank 8 = fewer trainable parameters = less overfitting risk
+    # For 142 examples, rank 8 is solid — could go to 16 with 300+ examples
+    lora_rank: int = 8
+
+    # Only adapt 8 of 32 layers — "light touch" fine-tuning
+    # Full 32 layers would memorize; 8 layers learns style
+    num_layers: int = 8
+
+    # Aggressive dropout — randomly zeros 10% of LoRA weights each step
+    # Acts like a regularizer, forces the model to learn general patterns
+    lora_dropout: float = 0.1
+
+    # ── Training ───────────────────────────────────────────────
+    # Small batch = implicit regularization (noisier gradients = less memorization)
+    batch_size: int = 2
+
+    # Conservative learning rate — we want gentle style transfer, not overwriting
+    # 1e-5 is ~10x lower than typical LoRA defaults (1e-4)
+    learning_rate: float = 1e-5
+
+    # 400 iterations ≈ 7 epochs over 113 training examples (80% of 142)
+    # More data = fewer epochs needed. Watch val loss — if it climbs, we're overfitting
+    iters: int = 400
+
+    # Check validation loss every 50 steps (~1.5 epochs)
+    # Frequent enough to catch overfitting early
+    steps_per_eval: int = 50
+
+    # Save adapter checkpoint every 100 steps (safety net)
+    steps_per_save: int = 100
+
+    # CRITICAL: Only compute loss on ASSISTANT responses, not prompts
+    # Without this, the model wastes capacity "learning" to generate prompts
+    mask_prompt: bool = True
+
+    # ── Paths ──────────────────────────────────────────────────
+    # Where the training JSONL lives
+    data_dir: str = "data/training"
+
+    # Where prepared train/valid/test splits go
+    prepared_dir: str = "data/training/prepared"
+
+    # Where the LoRA adapter weights get saved
+    adapter_path: str = "adapters/writing-style"
+
+    # Where fused models go (only used for GGUF export path)
+    fused_model_path: str = "models/fused/writing-style"
+
+    # Where GGUF files go (only used for GGUF export path)
+    gguf_path: str = "models/gguf"
+
+    # ── Test Prompts ───────────────────────────────────────────
+    # Used by model_tester.py for A/B comparison
+    test_prompts: list[dict] = [
+        {
+            "context": "casual text to a close friend",
+            "prompt": "Write a casual text to a friend about getting together this weekend",
+        },
+        {
+            "context": "workplace communication",
+            "prompt": "Write a Slack message to a coworker about a bug you found in their PR",
+        },
+        {
+            "context": "church or ministry context",
+            "prompt": "Write a warm thank-you message to someone who helped with a church event",
+        },
+        {
+            "context": "online review",
+            "prompt": "Write a positive review for a local coffee shop you really like",
+        },
+        {
+            "context": "technical writing or explanation",
+            "prompt": "Explain what a REST API is to someone who's never heard of it",
+        },
+        {
+            "context": "personal text message",
+            "prompt": "Write a birthday message to your brother",
+        },
+        {
+            "context": "workplace communication",
+            "prompt": "Write a message to your team announcing you'll be out of office next week",
+        },
+    ]
+
+
 class PromptConfig(BaseSettings):
     """
     System prompt and context injection templates.
@@ -136,3 +249,4 @@ ollama_config = OllamaConfig()
 chunking_config = ChunkingConfig()
 retrieval_config = RetrievalConfig()
 prompt_config = PromptConfig()
+finetune_config = FineTuneConfig()

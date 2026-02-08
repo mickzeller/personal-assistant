@@ -8,6 +8,7 @@ from .config import (
     chunking_config,
     retrieval_config,
     prompt_config,
+    finetune_config,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "chunking_config",
     "retrieval_config",
     "prompt_config",
+    "finetune_config",
 ]
