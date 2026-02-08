@@ -180,7 +180,7 @@ Question: {{ .Content }}<|eot_id|>
         "PARAMETER stop <|start_header_id|>",
         "PARAMETER stop <|end_header_id|>",
         "PARAMETER stop <|eot_id|>",
-        "PARAMETER temperature 0.7",
+        f"PARAMETER temperature {finetune_config.temperature}",
         "PARAMETER top_p 0.9",
         "",
     ])

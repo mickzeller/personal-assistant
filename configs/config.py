@@ -134,6 +134,12 @@ class FineTuneConfig(BaseSettings):
     # Acts like a regularizer, forces the model to learn general patterns
     lora_dropout: float = 0.1
 
+    # ── Inference ──────────────────────────────────────────────
+    # Temperature controls randomness in generation (0.0 = deterministic, 1.0 = creative)
+    # 0.5 keeps responses natural without getting too wild or over-enthusiastic
+    # Previous: 0.7 — produced overly hyped output. Dialed back for v3
+    temperature: float = 0.5
+
     # ── Training ───────────────────────────────────────────────
     # Small batch = implicit regularization (noisier gradients = less memorization)
     batch_size: int = 2
@@ -142,9 +148,10 @@ class FineTuneConfig(BaseSettings):
     # 1e-5 is ~10x lower than typical LoRA defaults (1e-4)
     learning_rate: float = 1e-5
 
-    # 400 iterations ≈ 7 epochs over 113 training examples (80% of 142)
-    # More data = fewer epochs needed. Watch val loss — if it climbs, we're overfitting
-    iters: int = 400
+    # 300 iterations ≈ 5 epochs over ~113 training examples (80% of 142)
+    # Reduced from 400 to prevent overfitting — v2 was still too eager
+    # Watch val loss: if it climbs while train loss drops, we've gone too far
+    iters: int = 300
 
     # Check validation loss every 50 steps (~1.5 epochs)
     # Frequent enough to catch overfitting early

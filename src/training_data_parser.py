@@ -583,6 +583,217 @@ def _generate_prompt_for_raw_text(text: str, context: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
+# Conversation Log Parser (mick/k SMS threads)
+# ──────────────────────────────────────────────────────────────
+
+def _is_speaker_line(line: str) -> tuple[str, bool]:
+    """
+    Check if a line is a speaker header from a Slack/SMS export.
+
+    Handles these formats:
+      - "mick 2:38 PM"         → ("mick", True)
+      - "m 10:45 AM"           → ("mick", True)
+      - "k:palm_tree: 2:15 PM" → ("k", True)
+      - "k  sent June 21..."   → ("k", True)
+      - "You sent June 21..."  → ("mick", True)
+      - "mick"  (bare)         → ("mick", True)
+      - "k"     (bare)         → ("k", True)
+
+    Returns (speaker_name, True) if it's a speaker line, ("", False) otherwise.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return ("", False)
+
+    stripped_lower = stripped.lower()
+
+    # "You sent ..." = Mick
+    if stripped_lower.startswith("you sent"):
+        return ("mick", True)
+
+    # "k  sent ..." or "k:palm_tree: ..." or "k <timestamp>"
+    k_match = re.match(
+        r'^k(?::[\w-]+:)?\s+(?:sent\s|\.?\s*\d)',
+        stripped_lower,
+    )
+    if k_match:
+        return ("k", True)
+
+    # "mick <timestamp>" or "m <timestamp>"
+    mick_match = re.match(
+        r'^(?:mick|m)\s+\d',
+        stripped_lower,
+    )
+    if mick_match:
+        return ("mick", True)
+
+    # Bare "mick", "m", or "k" on their own line
+    if stripped_lower in ("mick", "m", "k"):
+        return ("mick" if stripped_lower in ("mick", "m") else "k", True)
+
+    return ("", False)
+
+
+def _is_continuation_timestamp(line: str) -> bool:
+    """
+    Check if a line is a bare continuation timestamp (e.g. "2:23", "10:46").
+
+    These indicate a follow-up message from the same speaker.
+    """
+    return bool(re.match(r'^\d{1,2}:\d{2}(?:\s*(?:AM|PM|am|pm))?\s*$', line.strip()))
+
+
+def _is_slack_noise(line: str) -> bool:
+    """
+    Check if a line is Slack-specific noise that should be stripped.
+
+    Catches: emoji reactions, thread markers, date headers, "Paid", etc.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return True
+
+    # Pure Slack emoji (e.g. ":joy:", ":pray::skin-tone-3:", ":1000:")
+    if re.match(r'^(?::\w[\w-]*:)+\s*$', stripped):
+        return True
+
+    # Reaction counts (just a number by itself, like "1")
+    if re.match(r'^\d{1,2}$', stripped):
+        return True
+
+    # Thread markers: "5 replies", "Last reply ... View thread"
+    if re.match(r'^\d+ repl', stripped.lower()) or 'view thread' in stripped.lower():
+        return True
+
+    # Date-only headers: "June 7, 2021", "Yesterday at 10:01 AM", "Mon 7:06 PM"
+    if re.match(r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d', stripped):
+        return True
+    if re.match(r'^(?:Yesterday|Today)\s+at\s+\d', stripped):
+        return True
+    if re.match(r'^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d', stripped):
+        return True
+
+    # "(edited)" by itself
+    if stripped.lower() == "(edited)":
+        return True
+
+    return False
+
+
+def _clean_slack_text(text: str) -> str:
+    """Strip Slack artifacts from message text."""
+    # Remove trailing "(edited)" marker
+    text = re.sub(r'\s*\(edited\)\s*$', '', text)
+    # Convert Slack emoji to Unicode where common, otherwise strip
+    emoji_map = {
+        ":joy:": "", ":laughing:": "", ":pray:": "",
+        ":1000:": "", ":point_up_2:": "", ":fire:": "",
+        ":heart:": "", ":thumbsup:": "", ":tada:": "",
+        ":four_leaf_clover:": "", ":tired_face:": "",
+    }
+    for slack_emoji, replacement in emoji_map.items():
+        text = text.replace(slack_emoji, replacement)
+    # Strip any remaining Slack emoji with skin tones etc.
+    text = re.sub(r':[\w-]+:', '', text)
+    return text.strip()
+
+
+def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
+    """
+    Parse a Slack/SMS conversation log between Mick and a friend.
+
+    Handles Slack exports with timestamps, emoji reactions, thread markers,
+    date headers, and continuation messages (bare timestamps for the same
+    speaker). Only extracts Mick's messages as training examples.
+
+    When Mick sends multiple messages in a row (continuation timestamps),
+    they get merged into one training example — that's how real texting works.
+    """
+    raw = file_path.read_text(encoding="utf-8")
+    lines = raw.split('\n')
+
+    # Collect all of Mick's messages
+    messages = []
+    current_speaker = None
+    current_lines = []
+
+    for line in lines:
+        speaker, is_header = _is_speaker_line(line)
+
+        if is_header:
+            # Save previous message if it was Mick's
+            if current_speaker == "mick" and current_lines:
+                msg = _clean_slack_text('\n'.join(current_lines))
+                if msg:
+                    messages.append(msg)
+
+            current_speaker = speaker
+            current_lines = []
+            continue
+
+        # Continuation timestamp — same speaker, new message bubble
+        # Start a new "paragraph" within the same message
+        if _is_continuation_timestamp(line) and current_speaker:
+            # Don't break into a new message — just add a line break
+            # This preserves the rapid-fire texting style
+            continue
+
+        # Skip noise lines
+        if _is_slack_noise(line):
+            continue
+
+        # This line belongs to whoever spoke last
+        if current_speaker and line.strip():
+            current_lines.append(line.strip())
+
+    # Don't forget the last message
+    if current_speaker == "mick" and current_lines:
+        msg = _clean_slack_text('\n'.join(current_lines))
+        if msg:
+            messages.append(msg)
+
+    # Convert to training examples
+    examples = []
+    for msg in messages:
+        context = _classify_raw_message(msg)
+        prompt = _generate_prompt_for_raw_text(msg, context)
+
+        # Override context — these are all casual friend convos
+        if context == "casual conversation":
+            context = "casual text to a close friend"
+
+        examples.append(TrainingExample(
+            user_prompt=prompt,
+            assistant_response=msg,
+            context=context,
+            source_file=file_path.name,
+            example_type="conversation_log",
+        ))
+
+    return examples
+
+
+def is_conversation_log(raw: str) -> bool:
+    """
+    Detect if a markdown file is a mick/k conversation log.
+
+    Looks for multiple speaker lines in the first 100 lines.
+    Need at least 3 Mick lines and 2 K lines to be confident.
+    """
+    mick_count = 0
+    k_count = 0
+    for line in raw.split('\n')[:100]:
+        speaker, is_header = _is_speaker_line(line)
+        if is_header:
+            if speaker == "mick":
+                mick_count += 1
+            elif speaker == "k":
+                k_count += 1
+
+    return mick_count >= 3 and k_count >= 2
+
+
+# ──────────────────────────────────────────────────────────────
 # Plain Markdown Parser (reviews, notes, etc.)
 # ──────────────────────────────────────────────────────────────
 
@@ -652,7 +863,7 @@ def parse_training_directory(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     all_examples = []
-    stats = {"perplexity_md": 0, "docx": 0, "plain_md": 0, "skipped": 0}
+    stats = {"perplexity_md": 0, "docx": 0, "plain_md": 0, "conversation_log": 0, "skipped": 0}
 
     console.print(f"\n[bold blue]Parsing training data from: {directory}[/bold blue]\n")
 
@@ -672,6 +883,9 @@ def parse_training_directory(
                 if "pplx-full-logo" in raw or "perplexity.ai" in raw:
                     examples = parse_perplexity_md(file_path)
                     stats["perplexity_md"] += len(examples)
+                elif is_conversation_log(raw):
+                    examples = parse_conversation_md(file_path)
+                    stats["conversation_log"] += len(examples)
                 else:
                     examples = parse_plain_md(file_path)
                     stats["plain_md"] += len(examples)
@@ -697,7 +911,7 @@ def parse_training_directory(
     before_filter = len(all_examples)
     all_examples = [
         ex for ex in all_examples
-        if len(ex.assistant_response) >= 20  # Too short = probably not a real message
+        if len(ex.assistant_response) >= 10  # Too short = probably not a real message
         and not ex.assistant_response.lower().startswith(("how's this", "how does this", "what do you think"))
         # Max 4000 chars — anything longer is an essay, not a message
         and len(ex.assistant_response) <= 4000
@@ -726,6 +940,7 @@ def parse_training_directory(
     table.add_row("Perplexity conversations", str(stats["perplexity_md"]))
     table.add_row("Raw writing (DOCX)", str(stats["docx"]))
     table.add_row("Plain markdown", str(stats["plain_md"]))
+    table.add_row("Conversation logs", str(stats["conversation_log"]))
     table.add_row("Skipped files", str(stats["skipped"]))
     table.add_row("[bold]Total[/bold]", f"[bold]{len(all_examples)}[/bold]")
 

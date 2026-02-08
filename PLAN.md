@@ -6,11 +6,11 @@
 |-------|--------|---------|
 | **Phase 1:** Foundation | **Complete** | Ollama running, models pulled, Python project scaffolded, chat interface built |
 | **Phase 2:** RAG Pipeline | **Complete** | Ingestion (.md/.txt/.pdf/.json/.jsonl/.docx + Claude exports), ChromaDB (7,357 chunks), two-stage retrieval w/ reranking, chat integration, conversation logging, security hardening |
-| **Phase 3:** Fine-Tuning | **In Progress** | Training data collection started — 83 writing-style examples extracted from Perplexity exports + Slack messages. MLX LoRA fine-tuning next. |
+| **Phase 3:** Fine-Tuning | **In Progress** | v3 trained and deployed! 240 examples, MLX LoRA pipeline complete, unified CLI built. Eval framework up next. |
 | **Phase 4:** UI Polish | Not started | Gradio web interface (installed, not built yet) |
 | **Phase 5:** Advanced | Not started | DPO training, tool use, web search, multi-modal |
 
-> Last updated: Feb 2026
+> Last updated: Feb 7, 2026
 
 ## Table of Contents
 - [0. Hardware Profile](#0-hardware-profile)
@@ -1144,54 +1144,108 @@ Don't try to build the perfect system from day one. Each phase should produce so
 ### Phase 3: Fine-Tuning (Week 4-8) — IN PROGRESS
 **Goal: Make the model behave more like your ideal assistant**
 
-**Training Data Collection (started):**
+#### Training Data Collection
+
 - [x] Built training data parser (`src/training_data_parser.py`) — extracts writing style examples from multiple formats
 - [x] Exported 52 Perplexity conversation threads (SMS drafting, email writing, message crafting)
 - [x] Added Slack message history (DOCX format) — casual humor and phrasing
 - [x] Added Google reviews and other writing samples (plain MD)
-- [x] Renamed all 69 training files with descriptive kebab-case names for easy scanning
-- [x] Extracted **83 writing style examples** → `data/training/writing_style.jsonl` (MLX chat format)
+- [x] Renamed all 69+ training files with descriptive kebab-case names for easy scanning
+- [x] v1: Extracted **83 writing style examples** → `data/training/writing_style.jsonl`
+- [x] v2: Expanded to **142 examples** — removed 5 ultra-long examples that caused verbose/looping output
+- [x] v3: Expanded to **240 examples** — added chill everyday SMS messages + Slack conversation logs
+- [x] Built conversation log parser — auto-detects and parses Slack export format (mick/k speaker tags, timestamps, emoji, thread markers)
+- [x] Lowered quality filter minimum from 20 → 10 chars to keep short chill replies like "Sounds good" and "Yeah I think so"
 - [x] Conversation logger (`src/conversation_logger.py`) auto-collects future exchanges for fine-tuning
-- [ ] **Collect more writing samples** — goal: 200-500 custom examples (currently at 83)
-  - More Perplexity threads (SMS, email, message drafting)
-  - Old texts, emails, or social media posts
-  - Church/ministry communications
-  - Work messages (Slack, Teams, ticket comments)
 - [ ] Optional: use a frontier model to generate variations from your best examples (seed expansion)
+- [ ] Optional: collect more writing samples if model still needs tuning
 
-**HHH Alignment Data:**
-- [ ] Download and preprocess Anthropic HH-RLHF, OASST2, UltraFeedback
-- [ ] Mix and balance with your writing style examples
+**Training data breakdown (v3 — 240 examples):**
 
-**Fine-Tuning Pipeline:**
-- [ ] Set up MLX fine-tuning environment on your Mac (`pip install mlx mlx-lm`)
-- [ ] Format combined dataset as JSONL (MLX's expected format) — writing style data already in this format
-- [ ] Run your first LoRA fine-tuning job via MLX on Llama 3.1 8B
-  - Start with a small subset (1-2K examples) to validate the pipeline works
-  - Then scale up to your full dataset
-- [ ] Evaluate: compare base model vs. fine-tuned on your personal eval set
-- [ ] Iterate: adjust data mix, hyperparameters, training duration
-  - Your Mac can handle rapid iteration — 2-4 hours per run on 10K examples
-- [ ] Try at least 3-5 different training runs with different configurations
-- [ ] Merge best adapter and convert to GGUF for Ollama serving
-- [ ] Optional: try the same process on your PC via Unsloth + CUDA (if 3060 Ti fits)
-- [ ] Optional: try fine-tuning on cloud A100 if you want to push to larger models
+| Source Type | Examples | What It Captures |
+|-------------|----------|------------------|
+| Perplexity conversations | 65 | AI-assisted writing drafts (SMS, email, messages) |
+| Raw writing (DOCX) | 20 | Slack messages, direct writing samples |
+| Plain markdown | 109 | Chill SMS, reviews, work messages, church comms |
+| Conversation logs | 49 | Casual back-and-forth with a friend (Slack export) |
 
-**What's already built for this phase:**
+#### Training Runs
+
+| Version | Examples | Iterations | Temp | Key Changes | Result |
+|---------|----------|------------|------|-------------|--------|
+| **v1** | 83 | 600 | 0.7 | First run, max_seq_length 2048 | Verbose, loopy — long examples taught it to ramble |
+| **v2** | 142 | 400 | 0.7 | Removed ultra-long examples, dropped seq_len to 1024 | Better but over-enthusiastic — "AXE-CESSORY ALERT" energy |
+| **v3** | 240 | 300 | 0.5 | Added 89 chill examples, lowered temp & iters | Much more natural — still fun when asked, but defaults to chill |
+
+**Why these v3 changes worked:**
+- **Temperature 0.7 → 0.5:** The model was amplifying enthusiasm from the training data. Lower temp reins in the randomness without making it robotic.
+- **Iterations 400 → 300:** v2 was likely overfitting — memorizing training patterns too aggressively. Fewer iterations = lighter touch.
+- **89 new chill examples:** The original dataset skewed high-energy (excited texts, celebration messages, reviews). Adding mundane everyday messages ("Sounds good", "I'm on it", "You starting to feel better?") taught the model that not every response needs to be a production.
+
+#### Fine-Tuning Pipeline (Complete)
+
+- [x] Set up MLX fine-tuning environment on Mac (`mlx`, `mlx-lm`)
+- [x] Built full pipeline: parse → prepare (80/10/10 split) → train (MLX LoRA) → test (A/B comparison) → export (Ollama)
+- [x] Built unified CLI (`cli.py`) — single entry point for all commands
+- [x] Three successful training runs (v1, v2, v3) with iterative improvements
+- [x] Fuse + dequantize + Ollama create pipeline working reliably (Path B)
+- [x] Ollama model `llama3.1-mick:latest` deployed with proper Llama 3.1 chat template + stop tokens
+- [ ] Optional: fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B
+- [ ] Optional: try Gemma 3 9B or Qwen 2.5 7B as alternative fine-tuning targets
+- [ ] Optional: try the same process on PC via Unsloth + CUDA (if 3060 Ti fits)
+
+#### Evaluation Framework (Next Up)
+
+The v1-v3 iterations relied on vibes-based A/B testing ("does this sound like me?"). That worked for initial development but doesn't scale — we need measurable, repeatable evaluation to compare models objectively.
+
+**Level 1: Automated Style Metrics** — measures writing style quantitatively
+
+| Metric | What It Measures | Why It Matters |
+|--------|-----------------|----------------|
+| Response length distribution | Average/median/p95 char count | Catches verbose or too-terse output |
+| Exclamation mark density | `!` per response | The over-enthusiasm meter — v2's biggest problem |
+| Emoji frequency | Emoji per response | Should be ≤1, and only when it adds something |
+| Contraction usage | "I'll" vs "I will" ratio | Mick uses contractions naturally — the model should too |
+| Vocabulary overlap with training data | Jaccard similarity of word sets | Higher = more natural word choices |
+| Capitalization patterns | ALL CAPS word frequency | v2 was screaming; v3 should be calmer |
+
+**Level 2: LLM-as-Judge** — uses a frontier model (Claude API) to score outputs
+
+| Dimension | What the Judge Evaluates |
+|-----------|-------------------------|
+| Naturalness | "Does this sound like a real person or an AI?" |
+| Style match | "Does this match the reference writing samples?" |
+| Enthusiasm calibration | "Is the energy level appropriate for the prompt?" |
+| Conciseness | "Does it get to the point without unnecessary buildup?" |
+| Overall preference | "Which response (A or B) would you rather receive as a text?" |
+
+The judge compares outputs from different model versions (base vs v2 vs v3) across a standardized set of 30+ test prompts covering all writing contexts (casual, work, church, technical, reviews).
+
+**Implementation plan:**
+- `src/evaluator.py` — test runner + style metrics (Level 1)
+- `src/llm_judge.py` — LLM-as-judge scoring via Claude/GPT-4 API (Level 2)
+- `configs/eval_prompts.py` — standardized test prompt suite
+- Output: comparison reports with tables, scores, and per-prompt breakdowns
+
+#### What's Built for This Phase
 
 | Component | File | Status |
 |-----------|------|--------|
-| Training data parser | `src/training_data_parser.py` | **Working** — handles Perplexity MD, DOCX, plain MD formats |
-| Writing style JSONL | `data/training/writing_style.jsonl` | **83 examples** in MLX chat format |
-| Extraction stats | `data/training/stats.json` | Breakdown by source and quality metrics |
+| Unified CLI | `cli.py` | **Working** — `python cli.py <command>` for everything |
+| Training data parser | `src/training_data_parser.py` | **Working** — handles Perplexity MD, DOCX, plain MD, + conversation logs |
+| Data splitter | `src/data_splitter.py` | **Working** — 80/10/10 split with fixed seed |
+| Fine-tune orchestrator | `src/finetune.py` | **Working** — prepare/train/test/export/all |
+| Model tester | `src/model_tester.py` | **Working** — side-by-side A/B comparison |
+| Ollama exporter | `src/ollama_exporter.py` | **Working** — fuse → dequantize → Ollama create with chat template |
+| Writing style JSONL | `data/training/writing_style.jsonl` | **240 examples** in MLX chat format |
 | Conversation logger | `src/conversation_logger.py` | **Working** — accumulating data with every chat session |
-| Training data files | `knowledge_base/training_data/` | **69 files** — descriptively named, ready for re-parsing |
+| Config | `configs/config.py` | Centralized — temp, iters, LoRA rank, paths, all in one place |
 
-**Deliverable:** A fine-tuned model that matches your writing style, follows instructions better, and feels like a natural extension of how you communicate.
+**Deliverable:** A fine-tuned model that matches your writing style, follows instructions better, and feels like a natural extension of how you communicate. Plus a repeatable evaluation framework to measure improvement objectively.
 
 **Time estimate:** 15-30 hours (faster than original estimate — MLX on M4 Max is quick, and you have more iteration headroom)
 
-**Cost estimate:** $0 locally on Mac. Cloud only if you want to fine-tune 70B+ models.
+**Cost estimate:** $0 locally on Mac. Cloud only if you want to fine-tune 70B+ models. LLM-as-judge eval uses Claude API (~$0.01-0.05 per eval run).
 
 ---
 
@@ -1259,7 +1313,7 @@ if you want to fine-tune a 70B model (cloud) or upgrade the PC GPU
 
 ## Quick-Start Checklist
 
-> **Status: Phase 1 & 2 complete. Phase 3 in progress** (training data collection started — 83 writing style examples ready).
+> **Status: Phase 1 & 2 complete. Phase 3 in progress** — v3 model trained (240 examples), eval framework up next.
 > If you're coming back to this after a break, here's how to pick up where we left off.
 
 ```bash
@@ -1267,17 +1321,21 @@ if you want to fine-tune a 70B model (cloud) or upgrade the PC GPU
 cd ~/code/sandbox/LLM_Discovery
 source .venv/bin/activate
 
-# Ingest documents (run this whenever you add new files to knowledge_base/)
-python -m src.ingest
+# See all available commands
+python cli.py --help
 
-# Start the interactive chat
-python -m src.chat
+# Common workflows:
+python cli.py parse                  # Rebuild training data from raw writing
+python cli.py pipeline               # Full pipeline: parse → prepare → train → test → export
+python cli.py chat                   # Chat with your assistant
+python cli.py chat --model gemma3    # Chat with a specific model
+python cli.py ingest                 # Ingest docs into RAG knowledge base
 
-# Chat with a different model (e.g., your Gemma3 27B daily driver)
-python -m src.chat --model gemma3:27b
-
-# Chat without RAG (raw model, no knowledge base)
-python -m src.chat --no-rag
+# Or run individual steps:
+python cli.py prepare                # Split data into train/valid/test
+python cli.py train                  # Fine-tune with MLX LoRA (~10 min)
+python cli.py test                   # A/B compare base vs fine-tuned
+python cli.py export                 # Create Ollama model
 ```
 
 ### Slash Commands Inside the Chat
@@ -1296,38 +1354,39 @@ python -m src.chat --no-rag
 
 | Model | Status | Purpose |
 |-------|--------|---------|
-| `llama3.1:8b-instruct-q8_0` | **Installed** | Default chat model, 128K context, fine-tuning target |
+| `llama3.1-mick:latest` | **Installed** | Fine-tuned writing style model (v3 — 240 examples, Q8_0) |
+| `llama3.1:8b-instruct-q8_0` | **Installed** | Base model, 128K context, fine-tuning target |
 | `nomic-embed-text` | **Installed** | Embedding model for RAG (called via Ollama) |
 | `gemma3:27b` | **Installed** | Daily driver — use `/model gemma3:27b` for stronger reasoning |
 | `qwen2.5:72b-instruct-q4_K_M` | Optional | Maximum capability — fits on M4 Max 64GB |
 
-### Training Data (Phase 3 — In Progress)
+### Training Data (Phase 3)
 
 ```bash
-# Parse training data from knowledge_base/training_data/ → JSONL for fine-tuning
-python -m src.training_data_parser
+# Parse training data from raw writing → JSONL
+python cli.py parse
 
-# Output goes to: data/training/writing_style.jsonl (83 examples so far)
+# Output: data/training/writing_style.jsonl (240 examples as of v3)
+# Supports: Perplexity MD, DOCX, plain MD, Slack/SMS conversation logs
 # Stats in: data/training/stats.json
+```
+
+### Fine-Tuning
+
+```bash
+# Run the full pipeline (parse → prepare → train → test → export)
+python cli.py pipeline
+
+# Or individual steps
+python cli.py prepare    # Split into train/valid/test (80/10/10)
+python cli.py train      # MLX LoRA fine-tuning (~10 min on M4 Max)
+python cli.py test       # A/B comparison: base vs fine-tuned
+python cli.py export     # Create Ollama model (llama3.1-mick)
 ```
 
 ### Conversation Logs (Auto-Collected)
 
-Every chat session auto-saves to `data/conversations/`. These accumulate future fine-tuning data.
-
-```bash
-# View recent conversation logs
-ls -lt data/conversations/
-
-# Use /log inside the chat to see session stats
-```
-
-### Next: MLX Fine-Tuning Setup
-
-```bash
-# Install MLX for fine-tuning on your Mac (when you're ready)
-pip install mlx mlx-lm
-```
+Every chat session auto-saves to `data/conversations/`. These accumulate future fine-tuning data. Use `/log` inside the chat to see session stats.
 
 ---
 
