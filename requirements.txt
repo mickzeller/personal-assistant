@@ -22,6 +22,9 @@ huggingface-hub>=0.20.0
 # UI (Phase 4, but install now so it's ready)
 gradio>=5.0.0
 
+# Evaluation (Claude API for LLM-as-a-Judge scoring)
+anthropic>=0.40.0
+
 # Utilities
 rich>=13.0.0           # Pretty terminal output
 python-dotenv>=1.0.0   # Environment config

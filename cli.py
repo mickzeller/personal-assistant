@@ -10,6 +10,7 @@ COMMANDS:
   prepare    Split JSONL into train/valid/test sets
   train      Run MLX LoRA fine-tuning
   test       A/B compare base model vs fine-tuned
+  evaluate   Score fine-tuned responses with Claude (LLM-as-a-Judge)
   export     Export fine-tuned model to Ollama
   pipeline   Full pipeline: parse → prepare → train → test → export
   chat       Chat with your model (Ollama)
@@ -18,6 +19,8 @@ COMMANDS:
 EXAMPLES:
   python cli.py parse                 # Rebuild training data from raw writing
   python cli.py train                 # Fine-tune with MLX LoRA
+  python cli.py evaluate              # Score responses with Claude
+  python cli.py evaluate --fresh      # Test + evaluate in one shot
   python cli.py pipeline              # Run everything start to finish
   python cli.py chat --model gemma3   # Chat with a specific model
 """
@@ -120,6 +123,15 @@ def cmd_chat(args):
     return True
 
 
+def cmd_evaluate(args):
+    """Score fine-tuned responses using Claude as a judge."""
+    from src.evaluator import run_evaluation
+    return run_evaluation(
+        results_path=args.results,
+        run_test_first=args.fresh,
+    )
+
+
 def cmd_ingest(args):
     """Ingest documents into the RAG knowledge base."""
     from src.ingest import ingest_directory
@@ -145,6 +157,8 @@ examples:
   python cli.py prepare               Split data into train/valid/test
   python cli.py train                 Fine-tune with MLX LoRA (~10 min)
   python cli.py test                  A/B compare base vs fine-tuned
+  python cli.py evaluate              Score responses with Claude
+  python cli.py evaluate --fresh      Test + evaluate in one shot
   python cli.py export                Create Ollama model
   python cli.py pipeline              Run everything start to finish
   python cli.py chat                  Chat with your assistant
@@ -202,6 +216,22 @@ examples:
         description="Generate side-by-side responses from base and fine-tuned models.",
     )
     p_test.set_defaults(func=cmd_test)
+
+    # ── evaluate ───────────────────────────────────────────────
+    p_evaluate = subparsers.add_parser(
+        "evaluate",
+        help="Score fine-tuned responses with Claude (LLM-as-a-Judge)",
+        description="Send model responses to Claude's API for structured scoring against Mick's writing style.",
+    )
+    p_evaluate.add_argument(
+        "--results", "-r",
+        help="Path to comparison_results.json (default: from config)",
+    )
+    p_evaluate.add_argument(
+        "--fresh", "-f", action="store_true",
+        help="Run test first to generate fresh comparison results",
+    )
+    p_evaluate.set_defaults(func=cmd_evaluate)
 
     # ── export ─────────────────────────────────────────────────
     p_export = subparsers.add_parser(

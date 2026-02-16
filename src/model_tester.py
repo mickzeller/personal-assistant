@@ -63,6 +63,7 @@ def generate_response_mlx(
     """
     try:
         from mlx_lm import load, generate
+        from mlx_lm.sample_utils import make_sampler
     except ImportError:
         console.print("[red]mlx-lm not installed. Run: pip install 'mlx-lm>=0.30.0'[/red]")
         raise
@@ -98,12 +99,16 @@ def generate_response_mlx(
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
         )
 
+    # mlx_lm 0.30+ uses a sampler function instead of a temp kwarg.
+    # make_sampler(temp=0.0) = greedy, temp=0.5 = balanced, temp=1.0 = creative
+    sampler = make_sampler(temp=temp)
+
     response = generate(
         model,
         tokenizer,
         prompt=formatted_prompt,
         max_tokens=max_tokens,
-        temp=temp,
+        sampler=sampler,
     )
 
     return response.strip()

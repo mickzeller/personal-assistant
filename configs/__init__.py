@@ -10,6 +10,11 @@ from .config import (
     prompt_config,
     finetune_config,
 )
+from .eval_config import (
+    eval_config,
+    load_writing_style_profile,
+    RUBRIC_DIMENSIONS,
+)
 
 __all__ = [
     "PROJECT_ROOT",
@@ -20,4 +25,7 @@ __all__ = [
     "retrieval_config",
     "prompt_config",
     "finetune_config",
+    "eval_config",
+    "load_writing_style_profile",
+    "RUBRIC_DIMENSIONS",
 ]

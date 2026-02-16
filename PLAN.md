@@ -6,11 +6,11 @@
 |-------|--------|---------|
 | **Phase 1:** Foundation | **Complete** | Ollama running, models pulled, Python project scaffolded, chat interface built |
 | **Phase 2:** RAG Pipeline | **Complete** | Ingestion (.md/.txt/.pdf/.json/.jsonl/.docx + Claude exports), ChromaDB (7,357 chunks), two-stage retrieval w/ reranking, chat integration, conversation logging, security hardening |
-| **Phase 3:** Fine-Tuning | **In Progress** | v3 trained and deployed! 240 examples, MLX LoRA pipeline complete, unified CLI built. Eval framework up next. |
+| **Phase 3:** Fine-Tuning | **In Progress** | v3 trained and deployed! 240 examples, MLX LoRA pipeline complete, unified CLI built. LLM-as-Judge eval pipeline built (Claude API). |
 | **Phase 4:** UI Polish | Not started | Gradio web interface (installed, not built yet) |
 | **Phase 5:** Advanced | Not started | DPO training, tool use, web search, multi-modal |
 
-> Last updated: Feb 7, 2026
+> Last updated: Feb 15, 2026
 
 ## Table of Contents
 - [0. Hardware Profile](#0-hardware-profile)
@@ -1194,38 +1194,34 @@ Don't try to build the perfect system from day one. Each phase should produce so
 - [ ] Optional: try Gemma 3 9B or Qwen 2.5 7B as alternative fine-tuning targets
 - [ ] Optional: try the same process on PC via Unsloth + CUDA (if 3060 Ti fits)
 
-#### Evaluation Framework (Next Up)
+#### Evaluation Framework (Built)
 
 The v1-v3 iterations relied on vibes-based A/B testing ("does this sound like me?"). That worked for initial development but doesn't scale — we need measurable, repeatable evaluation to compare models objectively.
 
-**Level 1: Automated Style Metrics** — measures writing style quantitatively
+**LLM-as-Judge Pipeline** — uses Claude's API to score fine-tuned outputs against Mick's writing style profile.
 
-| Metric | What It Measures | Why It Matters |
-|--------|-----------------|----------------|
-| Response length distribution | Average/median/p95 char count | Catches verbose or too-terse output |
-| Exclamation mark density | `!` per response | The over-enthusiasm meter — v2's biggest problem |
-| Emoji frequency | Emoji per response | Should be ≤1, and only when it adds something |
-| Contraction usage | "I'll" vs "I will" ratio | Mick uses contractions naturally — the model should too |
-| Vocabulary overlap with training data | Jaccard similarity of word sets | Higher = more natural word choices |
-| Capitalization patterns | ALL CAPS word frequency | v2 was screaming; v3 should be calmer |
-
-**Level 2: LLM-as-Judge** — uses a frontier model (Claude API) to score outputs
+Each response gets scored on 5 dimensions (1-5 scale):
 
 | Dimension | What the Judge Evaluates |
 |-----------|-------------------------|
-| Naturalness | "Does this sound like a real person or an AI?" |
-| Style match | "Does this match the reference writing samples?" |
-| Enthusiasm calibration | "Is the energy level appropriate for the prompt?" |
-| Conciseness | "Does it get to the point without unnecessary buildup?" |
-| Overall preference | "Which response (A or B) would you rather receive as a text?" |
+| **Tone** | Casual, warm, direct — not corporate or stiff |
+| **Word Choice** | Uses Mick's actual vocabulary (contractions, "a ton of", "my man", etc.) |
+| **Structure** | Gets to the point, opens with reaction/acknowledgment, doesn't over-explain |
+| **Authenticity** | Sounds like a real person, not an AI trying to be casual |
+| **Context Fit** | Tone-shifts appropriately (chill for friends, measured for work, warm for church) |
 
-The judge compares outputs from different model versions (base vs v2 vs v3) across a standardized set of 30+ test prompts covering all writing contexts (casual, work, church, technical, reviews).
+**How it works:**
+1. `python cli.py test` generates side-by-side comparison results (base vs fine-tuned)
+2. `python cli.py evaluate` sends each fine-tuned response to Claude with the rubric + Mick's writing style profile
+3. Claude returns structured JSON scores + per-dimension reasoning
+4. Results display as a Rich table and save to `data/training/eval_results.json` for tracking across runs
 
-**Implementation plan:**
-- `src/evaluator.py` — test runner + style metrics (Level 1)
-- `src/llm_judge.py` — LLM-as-judge scoring via Claude/GPT-4 API (Level 2)
-- `configs/eval_prompts.py` — standardized test prompt suite
-- Output: comparison reports with tables, scores, and per-prompt breakdowns
+**Key design decisions:**
+- **Judge model:** Claude Sonnet 4.5 — fast and cheap (~$0.01/run), plenty smart for scoring
+- **Writing style profile loaded from `~/.claude/CLAUDE.md` at runtime** — personal data stays out of version control, single source of truth
+- **Fixed the `temp` → `temperature` bug** in `model_tester.py` that was silently breaking all A/B test runs
+
+**Future: Level 1 Automated Style Metrics** — quantitative measures (response length, exclamation density, contraction ratio, etc.) that don't require API calls. These would complement the LLM-as-Judge scores with cheaper, faster signals.
 
 #### What's Built for This Phase
 
@@ -1235,7 +1231,9 @@ The judge compares outputs from different model versions (base vs v2 vs v3) acro
 | Training data parser | `src/training_data_parser.py` | **Working** — handles Perplexity MD, DOCX, plain MD, + conversation logs |
 | Data splitter | `src/data_splitter.py` | **Working** — 80/10/10 split with fixed seed |
 | Fine-tune orchestrator | `src/finetune.py` | **Working** — prepare/train/test/export/all |
-| Model tester | `src/model_tester.py` | **Working** — side-by-side A/B comparison |
+| Model tester | `src/model_tester.py` | **Working** — side-by-side A/B comparison (fixed `temp` bug) |
+| LLM-as-Judge evaluator | `src/evaluator.py` | **Working** — Claude API scoring with 5-dimension rubric |
+| Eval config | `configs/eval_config.py` | **Working** — rubric, judge model, profile loader from `~/.claude/CLAUDE.md` |
 | Ollama exporter | `src/ollama_exporter.py` | **Working** — fuse → dequantize → Ollama create with chat template |
 | Writing style JSONL | `data/training/writing_style.jsonl` | **240 examples** in MLX chat format |
 | Conversation logger | `src/conversation_logger.py` | **Working** — accumulating data with every chat session |
@@ -1313,7 +1311,7 @@ if you want to fine-tune a 70B model (cloud) or upgrade the PC GPU
 
 ## Quick-Start Checklist
 
-> **Status: Phase 1 & 2 complete. Phase 3 in progress** — v3 model trained (240 examples), eval framework up next.
+> **Status: Phase 1 & 2 complete. Phase 3 in progress** — v3 model trained (240 examples), LLM-as-Judge eval pipeline built.
 > If you're coming back to this after a break, here's how to pick up where we left off.
 
 ```bash
@@ -1335,6 +1333,8 @@ python cli.py ingest                 # Ingest docs into RAG knowledge base
 python cli.py prepare                # Split data into train/valid/test
 python cli.py train                  # Fine-tune with MLX LoRA (~10 min)
 python cli.py test                   # A/B compare base vs fine-tuned
+python cli.py evaluate               # Score responses with Claude (LLM-as-Judge)
+python cli.py evaluate --fresh       # Test + evaluate in one shot
 python cli.py export                 # Create Ollama model
 ```
 
