@@ -1,25 +1,8 @@
 """
-Data Splitter — prepares training data for MLX LoRA fine-tuning.
+Data splitter — 80/10/10 into the train/valid/test files MLX-LM expects.
 
-WHY WE SPLIT:
-─────────────
-MLX-LM expects three files in its data directory:
-  - train.jsonl  → what the model learns from
-  - valid.jsonl  → checked during training to detect overfitting
-  - test.jsonl   → held out for final evaluation after training
-
-The split is 80/10/10 which, with 83 examples, gives us:
-  ~66 train / ~9 valid / ~8 test
-
-That's tight but workable. The validation set is large enough to get
-a meaningful loss signal every 50 steps, and the test set gives us
-held-out examples for the A/B comparison tester.
-
-REPRODUCIBILITY:
-────────────────
-We shuffle with a fixed seed (42) so the split is identical every time.
-This matters when you're comparing training runs — you want the same
-examples in each set so differences come from hyperparameters, not data.
+Shuffles with a fixed seed so the split is identical every run —
+differences between training runs come from hyperparams, not the data.
 """
 
 import json
@@ -59,13 +42,11 @@ def split_data(
     if output_dir is None:
         output_dir = PROJECT_ROOT / finetune_config.prepared_dir
 
-    # Validate input exists
     if not input_path.exists():
         console.print(f"[red]Training data not found: {input_path}[/red]")
         console.print("[dim]Run the training data parser first to generate writing_style.jsonl[/dim]")
         raise FileNotFoundError(f"Missing training data: {input_path}")
 
-    # Read all examples
     with open(input_path, "r", encoding="utf-8") as f:
         examples = [json.loads(line) for line in f if line.strip()]
 
@@ -76,11 +57,9 @@ def split_data(
 
     console.print(f"[bold blue]Splitting {total} examples...[/bold blue]\n")
 
-    # Shuffle with fixed seed
     random.seed(seed)
     random.shuffle(examples)
 
-    # Calculate split points
     train_end = int(total * train_ratio)
     valid_end = train_end + int(total * valid_ratio)
 
@@ -88,16 +67,14 @@ def split_data(
     valid_data = examples[train_end:valid_end]
     test_data = examples[valid_end:]
 
-    # Ensure we have at least 1 example in each set
+    # Every set needs at least 1 example
     if len(valid_data) == 0 and len(train_data) > 2:
         valid_data = [train_data.pop()]
     if len(test_data) == 0 and len(train_data) > 2:
         test_data = [train_data.pop()]
 
-    # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write splits
     splits = {
         "train": train_data,
         "valid": valid_data,
@@ -114,7 +91,6 @@ def split_data(
         counts[name] = len(data)
         console.print(f"  [green]\u2713[/green] {output_path.name}: {len(data)} examples")
 
-    # Summary table
     console.print()
     table = Table(title="Data Split Summary")
     table.add_column("Split", style="cyan")

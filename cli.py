@@ -1,35 +1,14 @@
 #!/usr/bin/env python3
 """
-LLM Discovery CLI — your one-stop shop for the fine-tuning pipeline.
+LLM Discovery CLI — one-stop shop for the whole pipeline.
 
-Run `python cli.py --help` to see all available commands, or
-`python cli.py <command> --help` for details on a specific one.
-
-COMMANDS:
-  parse      Parse raw writing samples → JSONL training data
-  prepare    Split JSONL into train/valid/test sets
-  train      Run MLX LoRA fine-tuning
-  test       A/B compare base model vs fine-tuned
-  evaluate   Score fine-tuned responses with Claude (LLM-as-a-Judge)
-  export     Export fine-tuned model to Ollama
-  pipeline   Full pipeline: parse → prepare → train → test → export
-  chat       Chat with your model (Ollama)
-  ingest     Ingest documents into the RAG knowledge base
-
-EXAMPLES:
-  python cli.py parse                 # Rebuild training data from raw writing
-  python cli.py train                 # Fine-tune with MLX LoRA
-  python cli.py evaluate              # Score responses with Claude
-  python cli.py evaluate --fresh      # Test + evaluate in one shot
-  python cli.py pipeline              # Run everything start to finish
-  python cli.py chat --model gemma3   # Chat with a specific model
+Run `python cli.py --help` for commands and examples.
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-# Make sure we can import from the project root
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -96,7 +75,6 @@ def cmd_pipeline(args):
         border_style="bold green",
     ))
 
-    # Step 1: Parse training data
     console.print("\n[bold cyan]Step 1/5: Parsing training data...[/bold cyan]")
     args.input = None
     args.output = None
@@ -105,7 +83,6 @@ def cmd_pipeline(args):
         console.print("[red]Parse failed — no training examples found.[/red]")
         return False
 
-    # Steps 2-5: Delegate to finetune's run_all (prepare → train → test → export)
     console.print("\n[bold cyan]Steps 2-5: Prepare → Train → Test → Export[/bold cyan]")
     from src.finetune import run_all
     return run_all()

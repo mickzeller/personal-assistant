@@ -1,9 +1,4 @@
-"""
-Configuration for the Personal AI Assistant.
-
-All the knobs and dials in one place. Tweak these as you experiment —
-the defaults are solid starting points for your M4 Max setup.
-"""
+"""All the knobs and dials in one place. Tweak away."""
 
 from pathlib import Path
 from pydantic_settings import BaseSettings
@@ -19,169 +14,103 @@ CHROMA_DB_DIR = PROJECT_ROOT / "data" / "chroma_db"
 
 
 class OllamaConfig(BaseSettings):
-    """
-    Ollama connection settings.
-
-    Ollama runs a local HTTP API on port 11434 by default.
-    If you ever change the port or run it on another machine,
-    update the base_url here.
-    """
+    """Ollama connection settings (local API on 11434 by default)."""
     base_url: str = "http://localhost:11434"
 
-    # The model used for chat / generation
-    # Options on your machine: "gemma3:27b", "llama3.1:8b-instruct-q8_0"
-    # For max quality: use gemma3:27b (your daily driver)
-    # For testing/speed: use llama3.1:8b-instruct-q8_0
+    # gemma3:27b for quality, llama3.1:8b-instruct-q8_0 for speed
     chat_model: str = "llama3.1:8b-instruct-q8_0"
 
-    # The model used to generate embeddings for RAG
-    # nomic-embed-text is a great balance of quality and speed
+    # RAG embeddings — nomic is a solid balance of quality and speed
     embedding_model: str = "nomic-embed-text"
 
 
 class ChunkingConfig(BaseSettings):
     """
-    Controls how documents get split into chunks for the vector database.
-
-    WHY THIS MATTERS:
-    ─────────────────
-    Too big → chunks contain mixed topics, retrieval gets noisy
-    Too small → chunks lose context, model can't understand them
-    Sweet spot → each chunk captures one coherent idea with enough
-                 context to be useful on its own
-
-    512 tokens with 50 overlap is a good default. Experiment from here.
+    How docs get split for the vector DB. Too big = noisy retrieval,
+    too small = no context. 512/50 is a solid default.
     """
-    chunk_size: int = 512          # Target size in characters (~128 tokens)
-    chunk_overlap: int = 50        # Overlap between chunks (prevents cutting sentences)
+    chunk_size: int = 512          # characters (~128 tokens)
+    chunk_overlap: int = 50        # keeps sentences from getting cut in half
 
-    # Separators to split on, tried in order (most → least desirable)
-    # The splitter tries paragraph breaks first, then sentences, etc.
+    # Tried in order: paragraphs first, then lines, sentences, words
     separators: list[str] = ["\n\n", "\n", ". ", " ", ""]
 
 
 class RetrievalConfig(BaseSettings):
     """
-    Controls the RAG retrieval pipeline.
-
-    The pipeline works in two stages:
-    1. BROAD RETRIEVAL: Grab top_k candidates from ChromaDB (fast, approximate)
-    2. RERANKING: Score those candidates with a cross-encoder (slow, precise)
-       Then return the top rerank_top_k results
-
-    WHY TWO STAGES:
-    ────────────────
-    Embedding similarity (stage 1) is fast but sometimes misses relevant
-    chunks that use different wording. The cross-encoder (stage 2) reads
-    the query AND each chunk together, catching relevance that embeddings
-    miss. It's ~100ms slower but dramatically more accurate.
+    RAG retrieval settings. Two stages: grab top_k candidates from
+    ChromaDB (fast), then rerank with a cross-encoder that actually
+    reads query + chunk together (~100ms slower, way more accurate).
     """
-    # Stage 1: How many chunks to pull from ChromaDB
-    top_k: int = 10
+    top_k: int = 10          # stage 1: candidates from ChromaDB
+    rerank_top_k: int = 5    # stage 2: keepers after reranking
 
-    # Stage 2: How many chunks to keep after reranking
-    rerank_top_k: int = 5
-
-    # Cross-encoder model for reranking
-    # ms-marco-MiniLM-L-6-v2 is small, fast, and excellent at relevance scoring
+    # Small, fast, and great at relevance scoring
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-    # Minimum similarity score to include a chunk (0.0 to 1.0)
-    # Set to 0.0 to disable filtering — useful while you're learning
+    # Minimum rerank score to keep a chunk (0.0 = no filtering)
     min_relevance_score: float = 0.0
 
-    # ChromaDB collection name
     collection_name: str = "personal_knowledge"
 
 
 class FineTuneConfig(BaseSettings):
     """
-    LoRA fine-tuning configuration for MLX on Apple Silicon.
+    LoRA fine-tuning config for MLX on Apple Silicon.
 
-    WHY THESE VALUES:
-    ─────────────────
-    With only 83 training examples, we're in "tiny dataset" territory.
-    Every knob here is tuned to PREVENT OVERFITTING while still learning
-    Mick's writing style. Think of it as teaching with a light touch —
-    we want the model to pick up tone and phrasing patterns without
-    memorizing specific sentences.
-
-    The base model is a pre-quantized 4-bit Llama 3.1 8B from the
-    mlx-community — no conversion needed, it's ready to train.
+    Tiny dataset (~240 examples as of v3), so everything here is tuned to
+    prevent overfitting — we want tone and phrasing, not memorized sentences.
     """
 
     # ── Model ──────────────────────────────────────────────────
-    # Pre-quantized MLX model from HuggingFace (downloads ~4.5GB on first run)
-    # Using 4-bit keeps memory usage low and training fast on M4 Max
+    # Pre-quantized 4-bit MLX model (~4.5GB download on first run)
     base_model: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
 
-    # The Ollama model name we'll create after fine-tuning
+    # What we name the Ollama model after fine-tuning
     ollama_model_name: str = "llama3.1-mick:latest"
 
-    # Ollama base model for Modelfile (used for direct adapter import)
+    # Modelfile base for direct adapter import
     ollama_base_model: str = "llama3.1:8b-instruct-q8_0"
 
     # ── LoRA Hyperparameters ───────────────────────────────────
-    # Rank 8 = fewer trainable parameters = less overfitting risk
-    # For 142 examples, rank 8 is solid — could go to 16 with 300+ examples
+    # Rank 8 on 8 of 32 layers = light touch. Learns style without
+    # memorizing. Could go rank 16 with 300+ examples.
     lora_rank: int = 8
-
-    # Only adapt 8 of 32 layers — "light touch" fine-tuning
-    # Full 32 layers would memorize; 8 layers learns style
     num_layers: int = 8
 
-    # Aggressive dropout — randomly zeros 10% of LoRA weights each step
-    # Acts like a regularizer, forces the model to learn general patterns
+    # 10% dropout forces general patterns over specific sentences
     lora_dropout: float = 0.1
 
     # ── Inference ──────────────────────────────────────────────
-    # Temperature controls randomness in generation (0.0 = deterministic, 1.0 = creative)
-    # 0.5 keeps responses natural without getting too wild or over-enthusiastic
-    # Previous: 0.7 — produced overly hyped output. Dialed back for v3
+    # 0.7 produced overly hyped output — dialed back for v3
     temperature: float = 0.5
 
     # ── Training ───────────────────────────────────────────────
-    # Small batch = implicit regularization (noisier gradients = less memorization)
+    # Small batch = noisier gradients = less memorization
     batch_size: int = 2
 
-    # Conservative learning rate — we want gentle style transfer, not overwriting
-    # 1e-5 is ~10x lower than typical LoRA defaults (1e-4)
+    # ~10x lower than typical LoRA defaults — gentle style transfer
     learning_rate: float = 1e-5
 
-    # 300 iterations ≈ 5 epochs over ~113 training examples (80% of 142)
-    # Reduced from 400 to prevent overfitting — v2 was still too eager
-    # Watch val loss: if it climbs while train loss drops, we've gone too far
+    # ~5 epochs. Reduced from 400 — v2 was still too eager.
+    # If val loss climbs while train loss drops, we've gone too far.
     iters: int = 300
 
-    # Check validation loss every 50 steps (~1.5 epochs)
-    # Frequent enough to catch overfitting early
-    steps_per_eval: int = 50
+    steps_per_eval: int = 50    # check val loss often enough to catch overfitting
+    steps_per_save: int = 100   # checkpoint safety net
 
-    # Save adapter checkpoint every 100 steps (safety net)
-    steps_per_save: int = 100
-
-    # CRITICAL: Only compute loss on ASSISTANT responses, not prompts
-    # Without this, the model wastes capacity "learning" to generate prompts
+    # Only compute loss on assistant responses — without this the model
+    # wastes capacity learning to generate the prompts themselves
     mask_prompt: bool = True
 
     # ── Paths ──────────────────────────────────────────────────
-    # Where the training JSONL lives
     data_dir: str = "data/training"
-
-    # Where prepared train/valid/test splits go
     prepared_dir: str = "data/training/prepared"
-
-    # Where the LoRA adapter weights get saved
     adapter_path: str = "adapters/writing-style"
+    fused_model_path: str = "models/fused/writing-style"   # GGUF export path only
+    gguf_path: str = "models/gguf"                         # GGUF export path only
 
-    # Where fused models go (only used for GGUF export path)
-    fused_model_path: str = "models/fused/writing-style"
-
-    # Where GGUF files go (only used for GGUF export path)
-    gguf_path: str = "models/gguf"
-
-    # ── Test Prompts ───────────────────────────────────────────
-    # Used by model_tester.py for A/B comparison
+    # ── Test Prompts (used by model_tester.py) ─────────────────
     test_prompts: list[dict] = [
         {
             "context": "casual text to a close friend",
@@ -215,12 +144,7 @@ class FineTuneConfig(BaseSettings):
 
 
 class PromptConfig(BaseSettings):
-    """
-    System prompt and context injection templates.
-
-    This is where you define your assistant's "personality."
-    Feel free to customize the system_prompt — it's your assistant!
-    """
+    """System prompt and context templates — the assistant's personality."""
     system_prompt: str = (
         "You are a helpful, honest, and knowledgeable personal AI assistant. "
         "You answer questions based on the provided context and your general knowledge.\n\n"
@@ -232,8 +156,7 @@ class PromptConfig(BaseSettings):
         "- If you're unsure about something, say so"
     )
 
-    # Template for injecting retrieved context into the prompt
-    # {context} and {query} are replaced at runtime
+    # {context} and {query} get filled at runtime
     context_template: str = (
         "Here is relevant context from your knowledge base:\n\n"
         "---\n"
@@ -244,13 +167,11 @@ class PromptConfig(BaseSettings):
         "{query}"
     )
 
-    # Template when NO context is retrieved (general conversation)
+    # Used when nothing relevant was retrieved
     no_context_template: str = "{query}"
 
 
-# ──────────────────────────────────────────────────────────────
-# Single config instances (import these in other modules)
-# ──────────────────────────────────────────────────────────────
+# Import these singletons in other modules
 
 ollama_config = OllamaConfig()
 chunking_config = ChunkingConfig()

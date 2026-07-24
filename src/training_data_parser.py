@@ -1,29 +1,11 @@
 """
-Training Data Parser — converts your raw writing samples into fine-tuning format.
+Training data parser — turns raw writing samples into fine-tuning JSONL.
 
-THE BIG PICTURE:
-────────────────
-This script takes three kinds of source material:
+Sources: Perplexity exports (.md), real messages (.docx), conversation
+logs, and plain markdown (reviews, notes). Output is chat-format JSONL:
+system (who to write as) + user (the task) + assistant (my actual writing).
 
-  1. Perplexity exports (.md) — multi-turn "help me write this" conversations
-  2. Your real messages (.docx) — Slack, texts, emails you actually sent
-  3. Plain text/markdown (.md) — Google reviews, notes, any direct writing
-
-...and produces a single JSONL file in the chat format that MLX (and most
-fine-tuning tools) expect:
-
-  {"messages": [{"role": "system", "content": "..."},
-                {"role": "user", "content": "..."},
-                {"role": "assistant", "content": "..."}]}
-
-WHY THIS FORMAT:
-────────────────
-The model learns by seeing (instruction → response) pairs. For writing style:
-  - SYSTEM tells it WHO it's writing as (you!)
-  - USER provides the writing task / context
-  - ASSISTANT provides the ideal output (your actual writing or approved version)
-
-The quality of this data matters WAY more than the quantity.
+Quality matters a ton more than quantity here.
 """
 
 import json
@@ -55,17 +37,17 @@ SYSTEM_PROMPT = (
 @dataclass
 class TrainingExample:
     """One training sample for fine-tuning."""
-    user_prompt: str           # What the user asked for
-    assistant_response: str    # The ideal output (Mick's voice)
-    context: Optional[str] = None  # Optional: audience, tone, etc.
-    source_file: str = ""      # Which file this came from
-    example_type: str = ""     # "perplexity", "raw_writing", "review", etc.
+    user_prompt: str
+    assistant_response: str        # the ideal output, in my voice
+    context: Optional[str] = None  # audience, tone, etc.
+    source_file: str = ""
+    example_type: str = ""         # "perplexity", "raw_writing", "review", etc.
 
     def to_chat_format(self) -> dict:
         """Convert to MLX/OpenAI chat fine-tuning format."""
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # If we have context, bake it into the user prompt
+        # Bake context into the user prompt if we have it
         prompt = self.user_prompt
         if self.context:
             prompt = f"Context: {self.context}\n\nTask: {prompt}"
@@ -82,40 +64,25 @@ class TrainingExample:
 
 def _strip_perplexity_cruft(text: str) -> str:
     """Remove Perplexity branding, footnotes, and decorative HTML."""
-    # Remove the logo image tag
-    text = re.sub(r'<img[^>]*pplx[^>]*/?>', '', text)
-    # Remove decorative dividers
-    text = re.sub(r'<div[^>]*>⁂</div>', '', text)
-    # Remove hidden spans (footnote containers)
-    text = re.sub(r'<span[^>]*display:\s*none[^>]*>.*?</span>', '', text)
-    # Remove footnote references like [^5_1]
-    text = re.sub(r'\[\^[\w_]+\]', '', text)
-    # Remove footnote definitions at the bottom
-    text = re.sub(r'^\[\^[\w_]+\]:.*$', '', text, flags=re.MULTILINE)
-    # Remove *** dividers
-    text = re.sub(r'^\*{3}\s*$', '', text, flags=re.MULTILINE)
-    # Clean up excessive blank lines
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'<img[^>]*pplx[^>]*/?>', '', text)                            # logo
+    text = re.sub(r'<div[^>]*>⁂</div>', '', text)                                # dividers
+    text = re.sub(r'<span[^>]*display:\s*none[^>]*>.*?</span>', '', text)        # hidden footnote spans
+    text = re.sub(r'\[\^[\w_]+\]', '', text)                                     # footnote refs like [^5_1]
+    text = re.sub(r'^\[\^[\w_]+\]:.*$', '', text, flags=re.MULTILINE)            # footnote definitions
+    text = re.sub(r'^\*{3}\s*$', '', text, flags=re.MULTILINE)                   # *** dividers
+    text = re.sub(r'\n{3,}', '\n\n', text)                                       # extra blank lines
     return text.strip()
 
 
 def _extract_quoted_text(text: str) -> Optional[str]:
     """
-    Extract suggested/polished text from Perplexity's AI response.
+    Extract the suggested/polished text from a Perplexity response.
 
-    Perplexity uses several different formats for presenting suggestions:
-      1. > blockquotes (most common for final versions)
-      2. ```code blocks``` (wrapped in triple backticks)
-      3. - **Label:** "quoted text" (bullet lists with inline quotes)
-      4. **"Bold quoted text"** (inline bold with quotes)
-      5. "Quoted text" after a label on its own line
-      6. Plain text between *** dividers (already stripped, becomes
-         the text between blank sections)
-
-    We try them in order of reliability — blockquotes and code blocks
-    are the most unambiguous, bullet-list quotes are next.
+    Perplexity presents suggestions in a bunch of formats (blockquotes,
+    code blocks, bullet lists, bold quotes, standalone quotes), so we
+    try them in order of reliability.
     """
-    # 1. Blockquotes (> ...) — most reliable
+    # 1. Blockquotes — most reliable
     blockquote_lines = []
     for line in text.split('\n'):
         if line.strip().startswith('>'):
@@ -124,20 +91,18 @@ def _extract_quoted_text(text: str) -> Optional[str]:
     if blockquote_lines:
         return ' '.join(blockquote_lines).strip()
 
-    # 2. Code blocks (```...```)
+    # 2. Code blocks
     code_blocks = re.findall(r'```\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
     if code_blocks:
         return code_blocks[-1].strip()
 
-    # 3. Bold-quoted text: **"some text here"** (standalone on a line)
+    # 3. Bold-quoted text: **"some text here"**
     bold_quoted = re.findall(r'\*\*"(.+?)"\*\*', text, re.DOTALL)
     if bold_quoted:
         return bold_quoted[-1].strip()
 
-    # 4. Bullet list with labeled options:
-    #    - **Label:** "quoted text"  OR  - **Label:** quoted text
-    #    These often have multiple options — grab the LAST one
-    #    (Perplexity tends to put the best/most casual option last)
+    # 4. Bullet lists with labeled options — grab the LAST one,
+    #    Perplexity tends to put the best/most casual option last
     bullet_quotes = re.findall(
         r'-\s+\*\*[^*]+\*\*[:\s]+["\u201c](.+?)["\u201d]',
         text, re.DOTALL
@@ -145,14 +110,13 @@ def _extract_quoted_text(text: str) -> Optional[str]:
     if bullet_quotes:
         return bullet_quotes[-1].strip()
 
-    # 4b. Bullet options without quotes but with bold labels:
-    #    - **Label:** Some text here that continues to end of line
+    # 4b. Bullet options with bold labels but no quotes
     bullet_labeled = re.findall(
         r'-\s+\*\*[^*]+?\*\*[:\s]+(.+?)(?:\n|$)',
         text
     )
     if bullet_labeled:
-        # Filter out very short matches (likely just labels)
+        # Very short matches are probably just labels
         good_matches = [m.strip().strip('"').strip('\u201c\u201d') for m in bullet_labeled if len(m.strip()) > 20]
         if good_matches:
             return good_matches[-1]
@@ -165,16 +129,12 @@ def _extract_quoted_text(text: str) -> Optional[str]:
     if numbered:
         return numbered[-1].strip().strip('"').strip('\u201c\u201d')
 
-    # 6. Standalone quoted text (after AI commentary):
-    #    "Some message text here"
-    #    Look for multi-word quoted strings that look like messages
+    # 6. Standalone quoted lines that look like messages
     standalone_quotes = re.findall(r'^["\u201c](.{20,}?)["\u201d]\s*$', text, re.MULTILINE)
     if standalone_quotes:
         return standalone_quotes[-1].strip()
 
-    # 7. Text between the heading's user content and the AI analysis
-    #    (for single-turn files where the refined text is just... there)
-    #    Look for text after "Here's a" / "Here are" that's on its own paragraph
+    # 7. Paragraph after "Here's a..." / "Here are..." (single-turn files)
     heres_match = re.search(
         r'(?:Here\'s|Here are)[^\n]*:\s*\n\n(.+?)(?:\n\n|$)',
         text, re.DOTALL
@@ -189,8 +149,8 @@ def _extract_quoted_text(text: str) -> Optional[str]:
 
 
 def _is_user_confirmation(text: str) -> bool:
-    """Check if a user turn is confirming/approving the previous suggestion."""
-    # Only look at the first line (user might paste their final version after "This!")
+    """Check if a user turn is approving the previous suggestion."""
+    # First line only — the user might paste their final version after "This!"
     first_line = text.strip().split('\n')[0].strip().lower().rstrip('!').rstrip('.')
     confirmations = {
         "this", "perfect", "that's perfect", "love it",
@@ -198,17 +158,14 @@ def _is_user_confirmation(text: str) -> bool:
         "awesome", "great", "that's great", "that's good",
         "i like that", "i like this",
     }
-    # "this!" and "this?" are confirmations, but "this is to a..." is a new topic
+    # "this!" is a confirmation, but "this is to a..." is a new topic
     if first_line.startswith("this") and not first_line.startswith(("this is", "this one")):
         return True
     return first_line in confirmations
 
 
 def _classify_writing_context(user_prompt: str) -> str:
-    """
-    Infer the audience/context from the user's prompt.
-    This helps the training data include context clues.
-    """
+    """Infer the audience/context from the prompt so training data has context clues."""
     prompt_lower = user_prompt.lower()
 
     if any(w in prompt_lower for w in ["sms", "text", "message to my"]):
@@ -245,29 +202,15 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
     """
     Parse a Perplexity markdown export into training examples.
 
-    Strategy:
-    ─────────
-    Each Perplexity conversation follows this pattern:
-      # User's initial request (with their original text)
-      AI's response with suggestions / polished versions
-      ---
-      # User's follow-up (feedback, "try again", or confirmation)
-      AI's next iteration
-      ---
-      ... repeat until user approves
-
-    We want to capture:
-    1. The user's INITIAL request as the prompt
-    2. The LAST approved version as the ideal output
-    3. If user explicitly confirms ("This!"), use that version
-
-    For multi-topic conversations (user switches subjects mid-convo),
-    we treat each topic as a separate training example.
+    Each convo alternates user headings and AI responses split by ---
+    dividers. We capture the user's INITIAL request as the prompt and
+    the LAST approved version as the output. Multi-topic convos become
+    separate examples.
     """
     raw = file_path.read_text(encoding="utf-8")
     cleaned = _strip_perplexity_cruft(raw)
 
-    # Split into turns on --- dividers
+    # split into turns on --- dividers
     sections = re.split(r'\n---\n', cleaned)
 
     examples = []
@@ -281,7 +224,7 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
         if not section:
             continue
 
-        # Check if this section starts with a user heading (# ...)
+        # User turns start with a heading (# ...)
         heading_match = re.match(r'^#\s+(.+?)(?:\n|$)', section, re.DOTALL)
 
         if heading_match:
@@ -299,19 +242,18 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                         source_file=file_path.name,
                         example_type="perplexity_approved",
                     ))
-                # Reset for potential next topic
+                # Reset for the next topic
                 current_request = None
                 last_good_response = None
                 original_text = None
 
-                # But check if the AI's response to "This!" has a new topic
+                # The AI's response to "This!" might kick off a new topic
                 if ai_response_text:
                     quoted = _extract_quoted_text(ai_response_text)
                     if quoted:
                         last_good_response = quoted
                 continue
 
-            # Check if this is a new writing request or feedback on existing
             is_new_request = any(phrase in user_text.lower() for phrase in [
                 "can you help", "could you help", "can you make",
                 "could you make", "could you clean", "can you clean",
@@ -326,10 +268,9 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                 "my text is", "my sister", "my brother",
             ])
 
-            # Feedback is when the user is refining a PREVIOUS suggestion,
-            # NOT when they include these words in their initial request.
-            # "Can you make this sms sound more natural" = new request
-            # "more natural please" (alone) = feedback on previous
+            # Feedback = refining a PREVIOUS suggestion. "Can you make this
+            # sms sound more natural" is a new request; "more natural please"
+            # alone is feedback.
             is_feedback = (
                 not is_new_request
                 and any(phrase in user_text.lower() for phrase in [
@@ -343,7 +284,7 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
             )
 
             if is_new_request:
-                # Save previous example if we have one
+                # Save the previous example if we have one
                 if current_request and last_good_response:
                     examples.append(TrainingExample(
                         user_prompt=current_request,
@@ -353,21 +294,19 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                         example_type="perplexity_last_version",
                     ))
 
-                # Start tracking new request
                 current_request = user_text
                 current_context = _classify_writing_context(user_text)
                 original_text = user_text
                 last_good_response = None
 
-            # Check if user is providing their OWN version for feedback
-            # Patterns: "How's this", "How does this sound", or just pasting their draft
+            # User sharing their OWN draft for feedback?
             is_user_sharing_draft = any(phrase in user_text.lower() for phrase in [
                 "how's this", "how does this", "how about this",
                 "what about this", "this?", "this!",
             ])
 
-            if (is_user_sharing_draft or (user_text and not is_new_request and not is_feedback)):
-                # Could be user sharing their own draft — check AI response
+            if is_user_sharing_draft or (user_text and not is_new_request and not is_feedback):
+                # If the AI approved their draft, the draft itself is the gold example
                 ai_lower = ai_response_text.lower() if ai_response_text else ""
                 ai_approves = any(phrase in ai_lower for phrase in [
                     "that's a great", "that's perfect", "that's really",
@@ -387,12 +326,10 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                     # Sometimes the heading IS the message, sometimes it has
                     # a preamble like "How's this" followed by the message
                     user_message = user_text
-                    # Remove preamble if present
                     for preamble in ["how's this", "how does this sound",
                                      "how about this", "this?"]:
                         if user_message.lower().startswith(preamble):
                             user_message = user_message[len(preamble):].strip()
-                            # Remove leading punctuation after preamble
                             user_message = user_message.lstrip(':?!. \n')
                             break
 
@@ -407,17 +344,13 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                         last_good_response = user_message
                         continue
 
-            # Extract the AI's suggested text from this section
             quoted = _extract_quoted_text(ai_response_text)
             if quoted:
                 last_good_response = quoted
 
-            # Special case: "how does this sound?" patterns where the user's
-            # original text is embedded right after the heading, and the AI
-            # mostly just approves it or offers minor tweaks. If we have a
-            # heading that looks like a question about their own text, and
-            # the AI response approves, the user's text (after the heading)
-            # might be the best training example.
+            # Special case: "how does this sound?" where the user's own text
+            # sits right after the heading and the AI just approves it
+            # that text might be the best training example
             if not last_good_response and not is_new_request:
                 # Check if user is asking for feedback on their OWN text
                 user_lower = user_text.lower()
@@ -438,12 +371,12 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
                             last_good_response = candidate
 
         else:
-            # No heading — this is a continuation or AI-only response
+            # No heading. This is a continuation or AI-only response
             quoted = _extract_quoted_text(section)
             if quoted:
                 last_good_response = quoted
 
-    # Don't forget the last conversation if it wasn't explicitly confirmed
+    # Last conversation might not have gotten an explicit confirmation
     if current_request and last_good_response:
         examples.append(TrainingExample(
             user_prompt=current_request,
@@ -453,9 +386,8 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
             example_type="perplexity_last_version",
         ))
 
-    # Special case: if we found NO examples but the file has a single heading
-    # where the heading text itself IS a complete message (user submitted their
-    # draft as the heading), and the AI approved it
+    # Special case: no examples found, but the heading itself IS the message
+    # (user submitted their draft as the heading and the AI approved it)
     if not examples and sections:
         first = sections[0].strip()
         heading_match = re.match(r'^#\s+(.+?)(?:\n|$)', first, re.DOTALL)
@@ -488,14 +420,9 @@ def parse_perplexity_md(file_path: Path) -> list[TrainingExample]:
 
 def parse_docx_raw_writing(file_path: Path) -> list[TrainingExample]:
     """
-    Parse a DOCX file containing Mick's raw writing (Slack messages, etc.).
-
-    These are pure gold — they're authentic examples of Mick's voice
-    with zero AI involvement. We frame them as "write a message like this"
-    training examples.
-
-    Since we don't have the original prompt (what was Mick responding to),
-    we infer a generic prompt from the content.
+    Parse a DOCX of raw writing (Slack messages, etc.) — pure gold, zero
+    AI involvement. We don't have the original prompt, so we reverse-engineer
+    a plausible one from the content.
     """
     from docx import Document
 
@@ -549,12 +476,7 @@ def _classify_raw_message(text: str) -> str:
 
 
 def _generate_prompt_for_raw_text(text: str, context: str) -> str:
-    """
-    Generate a realistic user prompt for a piece of raw writing.
-
-    Since these DOCX files are messages Mick actually sent, we need
-    to reverse-engineer a plausible prompt that would generate this output.
-    """
+    """Reverse-engineer a plausible user prompt for a piece of raw writing."""
     text_lower = text.lower()
     length = len(text)
 
@@ -588,28 +510,19 @@ def _generate_prompt_for_raw_text(text: str, context: str) -> str:
 
 def _is_speaker_line(line: str) -> tuple[str, bool]:
     """
-    Check if a line is a speaker header from a Slack/SMS export.
-
-    Handles these formats:
-      - "mick 2:38 PM"         → ("mick", True)
-      - "m 10:45 AM"           → ("mick", True)
-      - "k:palm_tree: 2:15 PM" → ("k", True)
-      - "k  sent June 21..."   → ("k", True)
-      - "You sent June 21..."  → ("mick", True)
-      - "mick"  (bare)         → ("mick", True)
-      - "k"     (bare)         → ("k", True)
-
-    Returns (speaker_name, True) if it's a speaker line, ("", False) otherwise.
+    Check if a line is a speaker header from a Slack/SMS export —
+    "mick 2:38 PM", "You sent...", "k:palm_tree: 2:15 PM", bare "m"/"k", etc.
+    Returns (speaker, True) or ("", False).
     """
     stripped = line.strip()
     if not stripped:
-        return ("", False)
+        return "", False
 
     stripped_lower = stripped.lower()
 
     # "You sent ..." = Mick
     if stripped_lower.startswith("you sent"):
-        return ("mick", True)
+        return "mick", True
 
     # "k  sent ..." or "k:palm_tree: ..." or "k <timestamp>"
     k_match = re.match(
@@ -617,7 +530,7 @@ def _is_speaker_line(line: str) -> tuple[str, bool]:
         stripped_lower,
     )
     if k_match:
-        return ("k", True)
+        return "k", True
 
     # "mick <timestamp>" or "m <timestamp>"
     mick_match = re.match(
@@ -625,47 +538,39 @@ def _is_speaker_line(line: str) -> tuple[str, bool]:
         stripped_lower,
     )
     if mick_match:
-        return ("mick", True)
+        return "mick", True
 
     # Bare "mick", "m", or "k" on their own line
     if stripped_lower in ("mick", "m", "k"):
-        return ("mick" if stripped_lower in ("mick", "m") else "k", True)
+        return "mick" if stripped_lower in ("mick", "m") else "k", True
 
-    return ("", False)
+    return "", False
 
 
 def _is_continuation_timestamp(line: str) -> bool:
-    """
-    Check if a line is a bare continuation timestamp (e.g. "2:23", "10:46").
-
-    These indicate a follow-up message from the same speaker.
-    """
+    """Bare timestamp like "2:23" — a follow-up message from the same speaker."""
     return bool(re.match(r'^\d{1,2}:\d{2}(?:\s*(?:AM|PM|am|pm))?\s*$', line.strip()))
 
 
 def _is_slack_noise(line: str) -> bool:
-    """
-    Check if a line is Slack-specific noise that should be stripped.
-
-    Catches: emoji reactions, thread markers, date headers, "Paid", etc.
-    """
+    """Slack noise to strip: emoji reactions, thread markers, date headers, etc."""
     stripped = line.strip()
     if not stripped:
         return True
 
-    # Pure Slack emoji (e.g. ":joy:", ":pray::skin-tone-3:", ":1000:")
+    # Pure Slack emoji (":joy:", ":pray::skin-tone-3:")
     if re.match(r'^(?::\w[\w-]*:)+\s*$', stripped):
         return True
 
-    # Reaction counts (just a number by itself, like "1")
+    # Reaction counts (bare numbers)
     if re.match(r'^\d{1,2}$', stripped):
         return True
 
-    # Thread markers: "5 replies", "Last reply ... View thread"
+    # Thread markers
     if re.match(r'^\d+ repl', stripped.lower()) or 'view thread' in stripped.lower():
         return True
 
-    # Date-only headers: "June 7, 2021", "Yesterday at 10:01 AM", "Mon 7:06 PM"
+    # Date-only headers: "Mon 7:06 PM", "Yesterday at 10:01 AM", "June 7, 2021"
     if re.match(r'^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d', stripped):
         return True
     if re.match(r'^(?:Yesterday|Today)\s+at\s+\d', stripped):
@@ -673,7 +578,6 @@ def _is_slack_noise(line: str) -> bool:
     if re.match(r'^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d', stripped):
         return True
 
-    # "(edited)" by itself
     if stripped.lower() == "(edited)":
         return True
 
@@ -682,9 +586,7 @@ def _is_slack_noise(line: str) -> bool:
 
 def _clean_slack_text(text: str) -> str:
     """Strip Slack artifacts from message text."""
-    # Remove trailing "(edited)" marker
     text = re.sub(r'\s*\(edited\)\s*$', '', text)
-    # Convert Slack emoji to Unicode where common, otherwise strip
     emoji_map = {
         ":joy:": "", ":laughing:": "", ":pray:": "",
         ":1000:": "", ":point_up_2:": "", ":fire:": "",
@@ -693,26 +595,20 @@ def _clean_slack_text(text: str) -> str:
     }
     for slack_emoji, replacement in emoji_map.items():
         text = text.replace(slack_emoji, replacement)
-    # Strip any remaining Slack emoji with skin tones etc.
+    # Catch any remaining Slack emoji (skin tones etc.)
     text = re.sub(r':[\w-]+:', '', text)
     return text.strip()
 
 
 def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
     """
-    Parse a Slack/SMS conversation log between Mick and a friend.
-
-    Handles Slack exports with timestamps, emoji reactions, thread markers,
-    date headers, and continuation messages (bare timestamps for the same
-    speaker). Only extracts Mick's messages as training examples.
-
-    When Mick sends multiple messages in a row (continuation timestamps),
-    they get merged into one training example — that's how real texting works.
+    Parse a Slack/SMS conversation log, extracting only my messages.
+    Back-to-back messages (continuation timestamps) get merged into one
+    example.
     """
     raw = file_path.read_text(encoding="utf-8")
     lines = raw.split('\n')
 
-    # Collect all of Mick's messages
     messages = []
     current_speaker = None
     current_lines = []
@@ -721,7 +617,7 @@ def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
         speaker, is_header = _is_speaker_line(line)
 
         if is_header:
-            # Save previous message if it was Mick's
+            # Save the previous message if it was mine
             if current_speaker == "mick" and current_lines:
                 msg = _clean_slack_text('\n'.join(current_lines))
                 if msg:
@@ -731,18 +627,14 @@ def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
             current_lines = []
             continue
 
-        # Continuation timestamp — same speaker, new message bubble
-        # Start a new "paragraph" within the same message
+        # Continuation timestamp — same speaker, keep the rapid-fire style together
         if _is_continuation_timestamp(line) and current_speaker:
-            # Don't break into a new message — just add a line break
-            # This preserves the rapid-fire texting style
             continue
 
-        # Skip noise lines
         if _is_slack_noise(line):
             continue
 
-        # This line belongs to whoever spoke last
+        # Line belongs to whoever spoke last
         if current_speaker and line.strip():
             current_lines.append(line.strip())
 
@@ -752,13 +644,12 @@ def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
         if msg:
             messages.append(msg)
 
-    # Convert to training examples
     examples = []
     for msg in messages:
         context = _classify_raw_message(msg)
         prompt = _generate_prompt_for_raw_text(msg, context)
 
-        # Override context — these are all casual friend convos
+        # These are all casual friend convos
         if context == "casual conversation":
             context = "casual text to a close friend"
 
@@ -775,10 +666,8 @@ def parse_conversation_md(file_path: Path) -> list[TrainingExample]:
 
 def is_conversation_log(raw: str) -> bool:
     """
-    Detect if a markdown file is a mick/k conversation log.
-
-    Looks for multiple speaker lines in the first 100 lines.
-    Need at least 3 Mick lines and 2 K lines to be confident.
+    Detect a mick/k conversation log — needs at least 3 mick lines and
+    2 k lines in the first 100 lines to be confident.
     """
     mick_count = 0
     k_count = 0
@@ -798,19 +687,13 @@ def is_conversation_log(raw: str) -> bool:
 # ──────────────────────────────────────────────────────────────
 
 def parse_plain_md(file_path: Path) -> list[TrainingExample]:
-    """
-    Parse plain markdown files that contain direct writing samples.
-
-    These might be Google reviews, notes, or other writing that
-    doesn't follow the Perplexity conversation format.
-    """
+    """Parse plain markdown (Google reviews, notes, other direct writing)."""
     raw = file_path.read_text(encoding="utf-8")
 
-    # Skip if it's a Perplexity export (has the logo)
+    # Perplexity exports get handled by parse_perplexity_md
     if "pplx-full-logo" in raw or "perplexity.ai" in raw:
-        return []  # Will be handled by parse_perplexity_md
+        return []
 
-    # Split on section dividers if present
     sections = re.split(r'\n——\n|\n---\n|\n\n---\n\n', raw)
     examples = []
 
@@ -819,14 +702,13 @@ def parse_plain_md(file_path: Path) -> list[TrainingExample]:
         if not section or len(section) < 20:
             continue
 
-        # Try to detect the type
         text_lower = section.lower()
 
         if any(w in text_lower for w in ["review", "star", "recommend", "rating"]):
             context = "online review"
             prompt = "Write an honest, detailed review"
         elif "google reviews" in text_lower:
-            continue  # Skip headers
+            continue  # skip headers
         else:
             context = _classify_raw_message(section)
             prompt = _generate_prompt_for_raw_text(section, context)
@@ -850,12 +732,7 @@ def parse_training_directory(
     directory: Path,
     output_path: Path = None,
 ) -> list[TrainingExample]:
-    """
-    Parse all training data files and produce a JSONL dataset.
-
-    Walks the directory, routes each file to the right parser,
-    collects all examples, and writes them out as JSONL.
-    """
+    """Route every file to the right parser and write the JSONL dataset."""
     directory = Path(directory)
     if output_path is None:
         output_path = directory.parent.parent / "data" / "training" / "writing_style.jsonl"
@@ -907,20 +784,18 @@ def parse_training_directory(
         except Exception as e:
             console.print(f"  [red]✗[/red] {file_path.name}: {e}")
 
-    # Quality filter — remove garbage examples
+    # Quality filter — under 10 chars isn't a real message, over 4000 is
+    # an essay, and "how's this..." means we grabbed the wrong side
     before_filter = len(all_examples)
     all_examples = [
         ex for ex in all_examples
-        if len(ex.assistant_response) >= 10  # Too short = probably not a real message
-        and not ex.assistant_response.lower().startswith(("how's this", "how does this", "what do you think"))
-        # Max 4000 chars — anything longer is an essay, not a message
-        and len(ex.assistant_response) <= 4000
+        if 10 <= len(ex.assistant_response) <= 4000
+           and not ex.assistant_response.lower().startswith(("how's this", "how does this", "what do you think"))
     ]
     filtered = before_filter - len(all_examples)
     if filtered:
         console.print(f"  [dim]Filtered {filtered} low-quality examples[/dim]")
 
-    # Write JSONL output
     if all_examples:
         with open(output_path, 'w', encoding='utf-8') as f:
             for ex in all_examples:
@@ -932,7 +807,6 @@ def parse_training_directory(
     else:
         console.print("\n[yellow]No training examples extracted.[/yellow]")
 
-    # Stats table
     table = Table(title="Extraction Summary")
     table.add_column("Source Type", style="cyan")
     table.add_column("Examples", justify="right", style="green")
@@ -981,7 +855,6 @@ if __name__ == "__main__":
     if examples:
         inspect_examples(examples, n=5)
 
-        # Also write a stats file for reference
         stats_path = training_dir.parent.parent / "data" / "training" / "stats.json"
         stats = {
             "total_examples": len(examples),

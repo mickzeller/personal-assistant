@@ -1,22 +1,12 @@
 """
-Evaluator — LLM-as-a-Judge scoring for fine-tuned writing style.
+LLM-as-a-Judge — Claude scores fine-tuned responses on 5 dimensions (1-5).
 
-THE PROBLEM:
-────────────
-Comparing model outputs by eyeballing side-by-side is fine for vibes,
-but it doesn't give us numbers we can track across training runs.
-"Does v3 sound more like me than v2?" is hard to answer without data.
-
-THE FIX:
-────────
-Send each fine-tuned response to Claude with a structured rubric and
-Mick's actual writing style profile. Claude scores each response on
-5 dimensions (1-5), giving us repeatable metrics we can chart over
-time: v2 vs v3, Llama vs Mistral, different hyperparams, etc.
+Eyeballing side-by-sides is fine for vibes, but numbers let us actually
+compare runs: v2 vs v3, different hyperparams, Llama vs Mistral, etc.
 
 USAGE:
-  python cli.py evaluate              # Score existing comparison results
-  python cli.py evaluate --fresh      # Run test first, then score
+  python cli.py evaluate           # score existing comparison results
+  python cli.py evaluate --fresh   # run test first, then score
 """
 
 import json
@@ -110,11 +100,7 @@ def evaluate_response(
     prompt: str,
     response: str,
 ) -> dict:
-    """
-    Send a single response to Claude for scoring.
-
-    Returns a dict with 'scores', 'reasoning', and 'overall_avg'.
-    """
+    """Send one response to Claude for scoring. Returns scores, reasoning, and the average."""
     from anthropic import Anthropic
     from dotenv import load_dotenv
 
@@ -134,10 +120,10 @@ def evaluate_response(
     # Parse Claude's JSON response
     raw_text = message.content[0].text.strip()
 
-    # Handle potential markdown code fences
+    # Strip markdown fences if Claude added them anyway
     if raw_text.startswith("```"):
-        raw_text = raw_text.split("\n", 1)[1]  # remove ```json line
-        raw_text = raw_text.rsplit("```", 1)[0]  # remove closing ```
+        raw_text = raw_text.split("\n", 1)[1]
+        raw_text = raw_text.rsplit("```", 1)[0]
         raw_text = raw_text.strip()
 
     result = json.loads(raw_text)
@@ -176,7 +162,6 @@ def evaluate_comparison(results: list[dict]) -> dict:
         prompt = result["prompt"]
         response = result["finetuned_response"]
 
-        # Skip error responses
         if response.startswith("[Error:"):
             console.print(f"  [yellow]Skipping test {i+1} (error response)[/yellow]")
             continue
@@ -190,13 +175,12 @@ def evaluate_comparison(results: list[dict]) -> dict:
                 "test_number": result["test_number"],
                 "context": context,
                 "prompt": prompt,
-                "response": response[:500],  # truncate for storage
+                "response": response[:500],  # truncated for storage
                 "scores": eval_result["scores"],
                 "reasoning": eval_result["reasoning"],
                 "overall_avg": eval_result["overall_avg"],
             })
 
-            # Brief inline feedback
             avg = eval_result["overall_avg"]
             color = "green" if avg >= 4.0 else "yellow" if avg >= 3.0 else "red"
             console.print(f"    [{color}]→ avg: {avg}/5.0[/{color}]")
@@ -206,7 +190,7 @@ def evaluate_comparison(results: list[dict]) -> dict:
         except Exception as e:
             console.print(f"  [red]Error evaluating test {i+1}: {e}[/red]")
 
-        # Be nice to the API — small delay between calls
+        # Be nice to the API... small delay between calls
         if i < len(results) - 1:
             time.sleep(0.5)
 
@@ -373,10 +357,8 @@ def run_evaluation(
     if not report:
         return False
 
-    # Save first (so data is safe even if display has issues)
+    # Save before displaying so the data's safe even if the table blows up
     _save_results(report, output_path)
-
-    # Then display
     _display_results(report)
 
     console.print(f"\n[bold green]Evaluation complete![/bold green]")

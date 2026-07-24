@@ -1,33 +1,13 @@
 """
-Fine-Tuning Orchestrator — the command center for training your writing style model.
+Fine-tuning orchestrator — prepare → train → test → export.
 
-HOW IT ALL FITS TOGETHER:
-─────────────────────────
-This script is the main entry point for the entire fine-tuning pipeline.
-Think of it as the conductor of an orchestra — it doesn't play instruments,
-but it makes sure everyone comes in at the right time.
-
-  ┌─────────────┐    ┌──────────────┐    ┌───────────────┐    ┌──────────────┐
-  │  --prepare   │ →  │   --train    │ →  │    --test     │ →  │   --export   │
-  │ Split data   │    │ MLX LoRA     │    │ A/B compare   │    │ Ollama model │
-  │ 80/10/10     │    │ fine-tuning  │    │ base vs. tuned│    │ llama3.1-mick│
-  └─────────────┘    └──────────────┘    └───────────────┘    └──────────────┘
-
-  Or just run --all to do the whole thing in one go.
-
-THE MLX ADVANTAGE:
-──────────────────
-Training happens entirely on your M4 Max's unified memory. No GPU rental,
-no cloud costs, no uploading your personal writing data anywhere. The model
-downloads once from HuggingFace (~4.5GB), trains for 5-15 minutes, and
-produces a tiny LoRA adapter (~50-200MB) that captures your writing style.
+Everything runs locally on Apple Silicon via MLX: no cloud costs, and
+my writing data never leaves the machine. The base model downloads once
+(~4.5GB), trains in ~10 min, and produces a small LoRA adapter.
 
 USAGE:
-  python -m src.finetune --prepare      # Split data into train/valid/test
-  python -m src.finetune --train        # Download model + run LoRA training
-  python -m src.finetune --test         # A/B comparison: base vs fine-tuned
-  python -m src.finetune --export       # Create Ollama model (llama3.1-mick)
-  python -m src.finetune --all          # Full pipeline, start to finish
+  python -m src.finetune --all    # full pipeline
+  (or --prepare / --train / --test / --export individually)
 """
 
 import argparse
@@ -50,12 +30,7 @@ console = Console()
 # ──────────────────────────────────────────────────────────────
 
 def prepare_data() -> bool:
-    """
-    Split training data into train/valid/test sets.
-
-    This is a thin wrapper around data_splitter — it exists so the
-    orchestrator has a consistent interface for all steps.
-    """
+    """Split training data into train/valid/test (thin wrapper around data_splitter)."""
     console.print(Panel(
         "[bold]Step 1: Data Preparation[/bold]\n\n"
         "Splitting writing_style.jsonl into train/valid/test sets.\n"
@@ -97,7 +72,7 @@ def train_model() -> bool:
     - Training is fast (~5-15 min on M4 Max)
     - The adapter is small (~50-200MB vs 4.5GB for the model)
     - The base model's knowledge is preserved
-    - We only learn Mick's writing STYLE, not new facts
+    - We only learn my writing STYLE, not new facts
     """
     console.print(Panel(
         "[bold]Step 2: LoRA Fine-Tuning[/bold]\n\n"
@@ -113,7 +88,6 @@ def train_model() -> bool:
         border_style="green",
     ))
 
-    # Verify prepared data exists
     prepared_dir = PROJECT_ROOT / finetune_config.prepared_dir
     train_file = prepared_dir / "train.jsonl"
     valid_file = prepared_dir / "valid.jsonl"
@@ -123,7 +97,6 @@ def train_model() -> bool:
         if not prepare_data():
             return False
 
-    # Create adapter output directory
     adapter_path = PROJECT_ROOT / finetune_config.adapter_path
     adapter_path.mkdir(parents=True, exist_ok=True)
 
@@ -134,8 +107,7 @@ def train_model() -> bool:
         console.print("Run: [cyan]pip install 'mlx-lm>=0.30.0'[/cyan]")
         return False
 
-    # Build the training args using mlx_lm's CONFIG_DEFAULTS as the base,
-    # then override with our FineTuneConfig values
+    # mlx_lm's CONFIG_DEFAULTS as the base, our config on top
     args = SimpleNamespace(**{
         **CONFIG_DEFAULTS,
         "model": finetune_config.base_model,
@@ -155,9 +127,9 @@ def train_model() -> bool:
         "lora_parameters": {
             "rank": finetune_config.lora_rank,
             "dropout": finetune_config.lora_dropout,
-            "scale": 20.0,  # Default LoRA scaling factor
+            "scale": 20.0,  # default LoRA scaling factor
         },
-        "max_seq_length": 1024,  # Cap to prevent learning ultra-long generation patterns
+        "max_seq_length": 1024,  # capped so it doesn't learn ultra-long generation patterns
         "grad_checkpoint": False,
         "seed": 42,
     })
@@ -181,7 +153,6 @@ def train_model() -> bool:
         elapsed = time.time() - start_time
         console.print(f"\n[red]Training failed after {elapsed / 60:.1f} minutes: {e}[/red]")
 
-        # Common error handling
         error_str = str(e).lower()
         if "out of memory" in error_str or "mps" in error_str:
             console.print("\n[yellow]Memory issue detected. Try these fixes:[/yellow]")
@@ -206,11 +177,8 @@ def train_model() -> bool:
 
 def test_model() -> bool:
     """
-    Run side-by-side comparison between base and fine-tuned model.
-
-    This is the "does it actually work?" step. Numbers (training loss)
-    are important, but reading the output is how you KNOW it learned
-    your writing style.
+    Side-by-side comparison between base and fine-tuned model. Loss curves
+    say IF it learned; reading the output is how you know WHAT it learned.
     """
     console.print(Panel(
         "[bold]Step 3: A/B Model Comparison[/bold]\n\n"
@@ -238,13 +206,7 @@ def test_model() -> bool:
 # ──────────────────────────────────────────────────────────────
 
 def export_model() -> bool:
-    """
-    Export the fine-tuned model to Ollama for daily use.
-
-    This creates a new Ollama model called 'llama3.1-mick' that you
-    can use anywhere Ollama models work — the chat interface, Open
-    WebUI, or any Ollama-compatible app.
-    """
+    """Export to Ollama as 'llama3.1-mick' — usable anywhere Ollama models work."""
     console.print(Panel(
         "[bold]Step 4: Ollama Export[/bold]\n\n"
         f"Creating Ollama model: [cyan]{finetune_config.ollama_model_name}[/cyan]\n"

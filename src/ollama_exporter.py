@@ -1,16 +1,16 @@
 """
-Ollama Exporter — turns your LoRA adapter into a chat-ready Ollama model.
+Ollama Exporter — turns LoRA adapter into a chat-ready Ollama model.
 
 THE TWO PATHS:
 ──────────────
 Getting an MLX-trained LoRA adapter into Ollama isn't plug-and-play.
 MLX and Ollama use different tensor formats, naming conventions, and
-config schemas. There are two ways to bridge that gap:
+config schemas. Two ways to bridge this gap:
 
-PATH A (Preferred — Convert Adapter to PEFT Format):
+PATH A (Preferred - Convert Adapter to PEFT Format):
   Ollama can import LoRA adapters in Hugging Face's PEFT format.
   MLX uses a different format, so we need to convert:
-    1. Rename tensor keys (lora_a → lora_A.weight, add base_model prefix)
+    1. Rename tensor keys (lora_a -> lora_A.weight, add base_model prefix)
     2. Transpose tensor shapes (MLX stores [rank, dim], PEFT wants [dim, rank])
     3. Rewrite adapter_config.json from MLX schema to PEFT schema
     4. Save as model.safetensors (Ollama looks for model*.safetensors)
@@ -33,6 +33,7 @@ Make sure `ollama pull llama3.1:8b-instruct-q8_0` has been run.
 import json
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -109,7 +110,6 @@ def _write_modelfile(
     the model gets {{ .Prompt }} which breaks chat UIs completely.
     The model won't know when to stop generating and will loop forever.
     """
-    # The full Llama 3.1 chat template — critical for app compatibility.
     # Copied from: ollama show llama3.1:8b-instruct-q8_0 --modelfile
     LLAMA31_TEMPLATE = """{{- if or .System .Tools }}<|start_header_id|>system<|end_header_id|>
 {{- if .System }}
@@ -283,7 +283,7 @@ def _convert_mlx_to_peft(
 
     console.print(f"  [green]\u2713[/green] Converted {len(new_state_dict)} tensors")
 
-    # ── Extract target modules from tensor keys ──
+    # Pull target modules out of the tensor keys
     target_modules = set()
     for key in loaded_state_dict.keys():
         for part in key.split("."):
@@ -293,7 +293,6 @@ def _convert_mlx_to_peft(
 
     console.print(f"  [dim]Target modules: {', '.join(target_modules)}[/dim]")
 
-    # ── Convert config ──
     mlx_config = {}
     if mlx_config_file.exists():
         with open(mlx_config_file) as f:
@@ -326,7 +325,6 @@ def _convert_mlx_to_peft(
         "use_rslora": False,
     }
 
-    # ── Save converted adapter ──
     peft_output_path.mkdir(parents=True, exist_ok=True)
 
     save_file(new_state_dict, str(peft_output_path / "model.safetensors"))
@@ -345,14 +343,8 @@ def export_path_a(
     model_name: str = None,
 ) -> bool:
     """
-    Path A: Convert MLX adapter to PEFT format, then import via Ollama.
-
-    Steps:
-      1. Convert MLX adapter → PEFT format (rename keys, transpose, rewrite config)
-      2. Write Modelfile pointing to the converted adapter
-      3. Run `ollama create` to register the model
-
-    Returns True if successful, False if we need to fall back to Path B.
+    Path A: convert the adapter to PEFT, write a Modelfile, ollama create.
+    Returns False if we need to fall back to Path B.
     """
     if adapter_path is None:
         adapter_path = PROJECT_ROOT / finetune_config.adapter_path
@@ -416,19 +408,9 @@ def export_path_b(
     model_name: str = None,
 ) -> bool:
     """
-    Path B: Fuse adapter into base model, then import into Ollama.
-
-    This bakes the LoRA weights directly into the model — no separate
-    adapter needed. The result is a full standalone model.
-
-    Steps:
-      1. Load base model + adapter using mlx_lm.load()
-      2. De-quantize from 4-bit to fp16 (Ollama needs full-precision weights)
-      3. Save fused model as safetensors
-      4. Create Ollama model pointing to the fused weights
-
-    No llama.cpp or GGUF conversion needed — Ollama can import
-    safetensors directly when it's a full model (not an adapter).
+    Path B: fuse the adapter into the base model, de-quantize to fp16,
+    and import the full standalone model. No GGUF needed — Ollama imports
+    safetensors directly when it's a full model.
     """
     if adapter_path is None:
         adapter_path = PROJECT_ROOT / finetune_config.adapter_path
@@ -453,8 +435,6 @@ def export_path_b(
         console.print(f"[red]Adapter not found: {adapter_path}[/red]")
         return False
 
-    # Step 1: Fuse adapter into base model using mlx_lm's CLI
-    # The Python API is: load(model, adapter_path) + dequantize + save
     console.print("\n[bold]Step 1/2: Fusing adapter into base model...[/bold]")
     console.print("[dim]This loads the model + adapter, de-quantizes to fp16, and saves[/dim]")
     console.print("[dim]This will take a few minutes and use significant memory...[/dim]\n")
@@ -466,7 +446,7 @@ def export_path_b(
         fused_path.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             [
-                str(PROJECT_ROOT / ".venv" / "bin" / "python"),
+                sys.executable,  # whatever python is running this — no hardcoded venv path
                 "-m", "mlx_lm", "fuse",
                 "--model", finetune_config.base_model,
                 "--adapter-path", str(adapter_path),
@@ -530,7 +510,7 @@ def export_to_ollama(
         border_style="green",
     ))
 
-    # Try Path A first
+    # Path A first
     success = export_path_a(adapter_path=adapter_path, model_name=model_name)
 
     if not success:

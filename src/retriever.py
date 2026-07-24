@@ -1,34 +1,10 @@
 """
-RAG Retrieval Module — finds the most relevant chunks for a user's question.
+RAG retrieval — finds the most relevant chunks for a question.
 
-THE TWO-STAGE PIPELINE:
-───────────────────────
-Stage 1 — BROAD RETRIEVAL (fast, approximate)
-    Embed the user's question → search ChromaDB for similar vectors
-    Returns top_k candidates (default: 10)
-    Speed: ~5-20ms
-
-Stage 2 — RERANKING (slow, precise)
-    Feed each candidate + the question into a cross-encoder model
-    The cross-encoder reads BOTH texts together (not just their embeddings)
-    and produces a relevance score
-    Returns the top rerank_top_k results (default: 5)
-    Speed: ~50-200ms
-
-WHY TWO STAGES?
-───────────────
-Embedding similarity (Stage 1) is like judging a book by its cover —
-fast but misses nuance. The cross-encoder (Stage 2) actually reads
-the content — slower but much more accurate.
-
-Example: Query = "How do I handle errors in Python?"
-    - Embedding search might return a chunk about "Python error types" (great)
-      AND a chunk about "Python virtual environments" (has the word "Python" but irrelevant)
-    - The reranker reads both chunks with the question and correctly scores
-      the error handling chunk much higher than the venv chunk.
-
-The combination gives us the speed of embeddings with the accuracy of
-a model that actually understands the question-document relationship.
+Two stages: embed the query and grab top_k candidates from ChromaDB
+(fast), then rerank with a cross-encoder that reads query + chunk
+together. The reranker is ~100ms slower but catches relevance that
+embedding similarity misses.
 """
 
 from dataclasses import dataclass
@@ -45,43 +21,22 @@ console = Console()
 
 @dataclass
 class RetrievedChunk:
-    """
-    A single retrieved chunk with its metadata and relevance scores.
-
-    Attributes:
-        text:            The actual text content of the chunk
-        source:          Which file this chunk came from
-        chunk_index:     Position within the original document
-        distance:        Raw cosine distance from ChromaDB (lower = more similar)
-        rerank_score:    Score from the cross-encoder (higher = more relevant)
-                         None if reranking wasn't applied
-    """
+    """One retrieved chunk with its source and scores."""
     text: str
     source: str
     chunk_index: int
-    distance: float
-    rerank_score: float | None = None
+    distance: float                    # cosine distance (lower = more similar)
+    rerank_score: float | None = None  # cross-encoder score (higher = better), None if not reranked
 
 
 class Retriever:
-    """
-    Two-stage retriever: semantic search + cross-encoder reranking.
-
-    Usage:
-        retriever = Retriever()
-        chunks = retriever.search("How do I use type hints in Python?")
-
-        for chunk in chunks:
-            print(f"[{chunk.source}] Score: {chunk.rerank_score:.3f}")
-            print(chunk.text)
-    """
+    """Two-stage retriever: semantic search + cross-encoder reranking."""
 
     def __init__(self):
         self.embedder = OllamaEmbedder()
         self.collection = get_chroma_collection()
 
-        # Load the cross-encoder reranker
-        # This downloads ~80MB the first time, then caches locally
+        # ~80MB download the first time, cached after that
         console.print("[dim]Loading reranker model...[/dim]", end=" ")
         self.reranker = CrossEncoder(
             retrieval_config.reranker_model,
@@ -146,22 +101,18 @@ class Retriever:
 
         # ── Stage 2: Reranking ────────────────────────────────────
         if use_reranking and len(chunks) > 1:
-            # Cross-encoder scores query-document pairs
             pairs = [[query, chunk.text] for chunk in chunks]
             scores = self.reranker.predict(pairs)
 
-            # Attach scores and sort by reranker score (highest first)
             for chunk, score in zip(chunks, scores):
                 chunk.rerank_score = float(score)
 
             chunks.sort(key=lambda c: c.rerank_score, reverse=True)
             chunks = chunks[:rerank_top_k]
         else:
-            # Without reranking, sort by distance (lowest first = most similar)
             chunks.sort(key=lambda c: c.distance)
             chunks = chunks[:rerank_top_k]
 
-        # ── Optional: Filter by minimum relevance ─────────────────
         if retrieval_config.min_relevance_score > 0 and use_reranking:
             chunks = [
                 c for c in chunks
@@ -196,7 +147,7 @@ class Retriever:
 
 
 # ──────────────────────────────────────────────────────────────
-# Quick test — run this file directly to try a search
+# Quick test — run directly to try a search
 # ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

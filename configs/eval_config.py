@@ -1,44 +1,27 @@
 """
-Evaluation configuration for the LLM-as-a-Judge pipeline.
+Config for the LLM-as-a-Judge pipeline — Claude scores responses against
+my writing style on 5 dimensions (1-5), so we get trackable numbers
+across training runs instead of just eyeballing outputs.
 
-Uses Claude's API to score fine-tuned model responses against
-Mick's writing style profile. Each response gets scored on five
-dimensions (1-5 scale), giving us trackable metrics across
-training runs instead of just eyeballing side-by-side outputs.
-
-The writing style profile is loaded at runtime from ~/.claude/CLAUDE.md
-so personal data stays out of version control.
+The style profile loads at runtime from ~/.claude/CLAUDE.md so personal
+data stays out of version control.
 """
 
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
 
-# ──────────────────────────────────────────────────────────────
-# Writing style profile loader
-# ──────────────────────────────────────────────────────────────
-
 CLAUDE_MD_PATH = Path.home() / ".claude" / "CLAUDE.md"
 
-# Sections from CLAUDE.md that are relevant to writing style evaluation.
-# Everything from "# About Mick" through "## Context-Specific Tones" —
-# covers tone, vocabulary, structure, examples, and context-shifting.
-# We stop before "## Working with Claude on Code" since that's Claude Code
-# instructions, not writing style data.
+# Everything before this marker is writing style; after it is
+# Claude Code config we don't want in the judge prompt
 _STYLE_END_MARKER = "## Working with Claude on Code"
 
 
 def load_writing_style_profile(path: Path = CLAUDE_MD_PATH) -> str:
     """
-    Load Mick's writing style profile from ~/.claude/CLAUDE.md.
-
-    Extracts everything from the start of the file through the end
-    of the context-specific tones section (stopping before the
-    "Working with Claude on Code" section, which is Claude Code
-    configuration, not writing style).
-
-    Returns the profile text, or a fallback message if the file
-    can't be found.
+    Load the writing style profile from ~/.claude/CLAUDE.md.
+    Returns a fallback message if the file's missing.
     """
     if not path.exists():
         return (
@@ -50,7 +33,6 @@ def load_writing_style_profile(path: Path = CLAUDE_MD_PATH) -> str:
 
     content = path.read_text(encoding="utf-8")
 
-    # Trim at the marker — everything before it is writing style
     marker_pos = content.find(_STYLE_END_MARKER)
     if marker_pos != -1:
         content = content[:marker_pos].rstrip()
@@ -121,19 +103,14 @@ class EvalConfig(BaseSettings):
     # Claude model used as the judge
     claude_model: str = "claude-sonnet-4-5-20250929"
 
-    # Where to save evaluation results
     eval_results_dir: str = "data/training"
     eval_results_filename: str = "eval_results.json"
 
-    # Where comparison results live (input to evaluator)
+    # Input to the evaluator (from model_tester.py)
     comparison_results_filename: str = "comparison_results.json"
 
     # Max tokens for Claude's scoring response
     max_tokens: int = 1024
 
-
-# ──────────────────────────────────────────────────────────────
-# Singleton instance
-# ──────────────────────────────────────────────────────────────
 
 eval_config = EvalConfig()

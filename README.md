@@ -12,7 +12,7 @@ A hands-on project exploring open-source LLMs, fine-tuning, and RAG — built on
 ## Quick Start
 
 ```bash
-cd ~/code/sandbox/LLM_Discovery
+./setup.sh                         # First time only — creates .venv via uv + installs deps
 source .venv/bin/activate
 
 python cli.py --help               # See all commands
@@ -20,6 +20,19 @@ python cli.py pipeline             # Full pipeline: parse → prepare → train 
 python cli.py evaluate --fresh     # Generate test responses + score them with Claude
 python cli.py chat                 # Chat with your fine-tuned model
 ```
+
+## Documentation
+
+Deep dives on how each part of the system works and why it's built that way:
+
+| Doc | Covers |
+|-----|--------|
+| [docs/RAG_PIPELINE.md](docs/RAG_PIPELINE.md) | Chunking tradeoffs, embeddings, two-stage retrieval, ChromaDB details |
+| [docs/FINE_TUNING.md](docs/FINE_TUNING.md) | LoRA in plain terms, the anti-overfitting reasoning behind every hyperparameter |
+| [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md) | The MLX-to-Ollama format gap, both export paths, the chat template gotcha |
+| [docs/TRAINING_DATA.md](docs/TRAINING_DATA.md) | Source formats, the Perplexity parsing strategy, quality filtering |
+
+The Lessons Learned section below stays here — it's the story of what went wrong and how we fixed it. The docs are the reference for how things work today.
 
 ## The Stack
 
@@ -36,11 +49,12 @@ python cli.py chat                 # Chat with your fine-tuned model
 ## Project Structure
 
 ```
-LLM_Discovery/
+personal-assistant/
 ├── cli.py                          # Unified CLI entry point
 ├── configs/
 │   ├── config.py                   # All training/RAG/model settings
 │   └── eval_config.py              # Evaluation rubric + Claude API config
+├── docs/                           # Deep-dive guides (RAG, fine-tuning, export, training data)
 ├── src/
 │   ├── chat.py                     # Interactive chat with RAG + Ollama
 │   ├── evaluator.py                # LLM-as-Judge scoring pipeline
@@ -113,6 +127,8 @@ This one cost hours of debugging. MLX saves LoRA adapters with different tensor 
 3. Create the Ollama model with re-quantization: `ollama create --quantize q8_0`
 
 Also: `mlx_lm.fuse` has no `fuse()` function you can import. It's a CLI subcommand: `python -m mlx_lm fuse` (not `python -m mlx_lm.fuse`). And the flag is `--dequantize`, not `--de-quantize`.
+
+Since then the exporter also gained a faster Path A (converting the adapter to PEFT format so Ollama imports it directly, ~21MB instead of ~8GB), with the fuse route above as the fallback. Both paths are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
 
 ### 5. Missing Chat Templates Break Everything Silently
 
@@ -188,7 +204,7 @@ The M4 Max is the MVP here. 64GB unified memory means you can run models up to ~
 
 ## What's Next
 
-- [ ] Run first scored evaluation (need API key in `.env`)
+- [x] Run first scored evaluation (v3 baseline: 2.8/5.0 — see scores above)
 - [ ] Fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B
 - [ ] Add automated style metrics (response length, exclamation density, contraction ratio)
 - [ ] Build Gradio web UI (Phase 4)

@@ -1,26 +1,8 @@
 """
-Model Tester — A/B comparison between base model and fine-tuned adapter.
+A/B tester — same prompts through the base model and the fine-tuned adapter.
 
-THE GOAL:
-─────────
-Numbers (loss curves) tell you IF the model learned.
-Side-by-side comparisons tell you WHAT it learned.
-
-This script generates responses from both the base Llama 3.1 8B
-(no adapter) and the fine-tuned version (with LoRA adapter), using
-the same prompts across different writing contexts. You read both
-and decide: "Does the fine-tuned one sound more like me?"
-
-The comparison covers all the contexts we trained on:
-  - Casual friend texts
-  - Work Slack messages
-  - Church/ministry
-  - Online reviews
-  - Technical explanations
-  - Personal messages
-
-Results are displayed side-by-side in the terminal AND saved to
-a JSON file so you can review them later.
+Loss curves tell you IF it learned; reading these side-by-side tells you
+WHAT it learned. Results print to the terminal and save to JSON.
 """
 
 import json
@@ -90,7 +72,7 @@ def generate_response_mlx(
             messages, tokenize=False, add_generation_prompt=True
         )
     else:
-        # Fallback: manual formatting
+        # Fallback: manual Llama 3.1 formatting
         formatted_prompt = (
             f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
             f"{SYSTEM_PROMPT}<|eot_id|>"
@@ -99,8 +81,7 @@ def generate_response_mlx(
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
         )
 
-    # mlx_lm 0.30+ uses a sampler function instead of a temp kwarg.
-    # make_sampler(temp=0.0) = greedy, temp=0.5 = balanced, temp=1.0 = creative
+    # mlx_lm 0.30+ takes a sampler function instead of a temp kwarg
     sampler = make_sampler(temp=temp)
 
     response = generate(
@@ -140,7 +121,6 @@ def run_comparison(
     if prompts is None:
         prompts = finetune_config.test_prompts
 
-    # Verify adapter exists
     adapter_dir = Path(adapter_path)
     if not adapter_dir.exists():
         console.print(f"[red]Adapter not found: {adapter_path}[/red]")

@@ -30,15 +30,8 @@ CONVERSATIONS_DIR = PROJECT_ROOT / "data" / "conversations"
 
 class ConversationLogger:
     """
-    Logs chat exchanges to a JSONL file.
-
-    Each session creates a new file: data/conversations/2026-02-06_21-30-00.jsonl
-    Each line in the file is one exchange (user message + assistant response).
-
-    Usage:
-        logger = ConversationLogger()
-        logger.log_exchange("Write me a text to my buddy", "Hey man! ...")
-        logger.close()  # Writes session summary
+    Logs chat exchanges to a timestamped JSONL file, one exchange per line.
+    Call close() at the end to write the session summary.
     """
 
     def __init__(self, model: str = "unknown"):
@@ -50,7 +43,6 @@ class ConversationLogger:
         self.model = model
         self.exchange_count = 0
 
-        # Write session header
         self._write_entry({
             "type": "session_start",
             "timestamp": self.session_start.isoformat(),
@@ -91,11 +83,10 @@ class ConversationLogger:
         })
 
     def _write_entry(self, entry: dict):
-        """Append a JSON line to the log file. Fails silently — logging
-        should never crash the chat."""
+        """Append a JSON line. Fails silently — logging should never crash the chat."""
         try:
             with open(self.log_file, "a", encoding="utf-8") as f:
                 json.dump(entry, f, ensure_ascii=False)
                 f.write("\n")
         except OSError:
-            pass  # Disk full, permissions, etc. — don't crash the chat
+            pass  # disk full, permissions, etc.

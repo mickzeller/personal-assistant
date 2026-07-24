@@ -1,13 +1,5 @@
 """
-Document Ingestion Pipeline — loads, chunks, embeds, and stores your documents.
-
-THE BIG PICTURE:
-────────────────
-                                ┌──────────────┐
-  Your files  ──►  Load text  ──►  Split into  ──►  Embed each  ──►  Store in
-  (.md, .txt,      from file      chunks           chunk            ChromaDB
-   .pdf, .json,                   (512 chars)      (nomic-embed)
-   .jsonl)
+Document ingestion — load, chunk, embed, store in ChromaDB.
 
 Each chunk gets stored with:
   1. The text itself (what the LLM will read)
@@ -76,38 +68,34 @@ def load_json_file(file_path: Path) -> str:
 
     raw = file_path.read_text(encoding="utf-8")
 
-    # Try JSONL first (one JSON object per line — common for training data)
+    # Try JSONL first (one object per line)
     lines = raw.strip().split("\n")
     if len(lines) > 1:
         try:
             records = [json.loads(line) for line in lines if line.strip()]
             return _format_chat_records(records)
         except json.JSONDecodeError:
-            pass  # Not JSONL, try standard JSON
+            pass  # not JSONL, try standard JSON
 
-    # Standard JSON
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw
 
-    # ── Auto-detect Claude export formats ─────────────────────────
+    # Claude export formats, detected by their signature keys
     if isinstance(data, list) and data:
         first = data[0] if isinstance(data[0], dict) else {}
 
-        # Claude conversations.json: [{uuid, name, chat_messages: [...]}, ...]
         if "chat_messages" in first:
             return _format_claude_conversations(data)
 
-        # Claude memories.json: [{conversations_memory, project_memories, ...}]
         if "conversations_memory" in first:
             return _format_claude_memories(data)
 
-        # Claude projects.json: [{name, description, docs: [...]}]
         if "docs" in first and "prompt_template" in first:
             return _format_claude_projects(data)
 
-    # ── Generic chat log formats ──────────────────────────────────
+    # Generic chat log formats
     if isinstance(data, list):
         return _format_chat_records(data)
 
@@ -128,29 +116,13 @@ def _format_claude_conversations(conversations: list[dict]) -> str:
     """
     Format Claude's conversations.json export into readable text.
 
-    Claude's structure:
-      [{
-        "name": "Conversation Title",
-        "summary": "AI-generated summary...",
-        "chat_messages": [
-          {"sender": "human", "text": "user's message"},
-          {"sender": "assistant", "text": "claude's response"}
-        ]
-      }, ...]
-
-    We format each conversation as a titled block with the summary
-    (great for embedding!) followed by the actual messages. The summary
-    alone is often enough for retrieval — it's a dense, searchable
-    description of what was discussed.
-
-    FILTERING: We skip the assistant's "thinking" preamble when it
-    starts with internal reasoning patterns like "The user wants to..."
-    or "Let me think through this". That's Claude's chain-of-thought,
-    not useful knowledge to retrieve.
+    Each convo becomes a titled block with its summary (dense and great
+    for retrieval) plus the messages. Assistant "thinking out loud"
+    preambles get filtered — that's process, not knowledge, and it
+    would pollute the embeddings.
     """
     parts = []
 
-    # Prefixes that indicate assistant "thinking out loud" — not useful content
     thinking_prefixes = (
         "the user ", "let me ", "i need to ", "i should ", "i'll ",
         "okay, ", "alright, ", "hmm", "so the user ", "this is ",
@@ -168,12 +140,10 @@ def _format_claude_conversations(conversations: list[dict]) -> str:
         if not messages and not summary:
             continue
 
-        # Start with the conversation title and summary
         convo_parts = [f"## {title}"]
         if summary:
             convo_parts.append(f"\nSummary: {summary}")
 
-        # Format each message
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
@@ -184,30 +154,23 @@ def _format_claude_conversations(conversations: list[dict]) -> str:
             if not text:
                 continue
 
-            # Map Claude's sender values to readable labels
             if sender == "human":
                 label = "User"
             elif sender == "assistant":
                 label = "Assistant"
 
-                # Filter out "thinking" preambles from assistant messages.
-                # These are Claude's internal chain-of-thought that got
-                # included in the export — stuff like "The user wants to
-                # run Kali Linux. Let me think about this..." before the
-                # actual useful response. We trim it because:
-                # 1. It's not knowledge — it's process
-                # 2. It would pollute embeddings with generic reasoning patterns
-                # 3. The actual answer that follows is what we want to retrieve
+                # Drop leading chain-of-thought lines ("The user wants to...")
+                # that leaked into the export — the answer below is what we want
                 text_lines = text.split("\n")
                 filtered_lines = []
-                skip_thinking = True  # Start by skipping thinking lines
+                skip_thinking = True
 
                 for line in text_lines:
                     stripped = line.strip().lower()
                     if skip_thinking and stripped and any(stripped.startswith(p) for p in thinking_prefixes):
-                        continue  # Skip this thinking line
+                        continue
                     else:
-                        skip_thinking = False  # Once we hit real content, stop filtering
+                        skip_thinking = False
                         filtered_lines.append(line)
 
                 text = "\n".join(filtered_lines).strip()
@@ -218,7 +181,7 @@ def _format_claude_conversations(conversations: list[dict]) -> str:
 
             convo_parts.append(f"\n{label}: {text}")
 
-        if len(convo_parts) > 1:  # More than just the title
+        if len(convo_parts) > 1:  # more than just the title
             parts.append("\n".join(convo_parts))
 
     return "\n\n---\n\n".join(parts)
@@ -226,17 +189,9 @@ def _format_claude_conversations(conversations: list[dict]) -> str:
 
 def _format_claude_memories(memories: list[dict]) -> str:
     """
-    Format Claude's memories.json export.
-
-    Structure: [{
-      "conversations_memory": "long text about the user...",
-      "project_memories": [{project_title, memories: [{memory}]}],
-      "account_uuid": "..."
-    }]
-
-    The conversations_memory field is pure gold for a personal assistant —
-    it's Claude's accumulated understanding of who you are, what you work on,
-    your preferences, etc. We format it cleanly for embedding.
+    Format Claude's memories.json export. The conversations_memory field
+    is pure gold for a personal assistant — it's Claude's accumulated
+    understanding of who you are and what you work on.
     """
     parts = []
 
@@ -244,12 +199,10 @@ def _format_claude_memories(memories: list[dict]) -> str:
         if not isinstance(mem_block, dict):
             continue
 
-        # Main memory — Claude's understanding of the user
         convo_memory = mem_block.get("conversations_memory", "").strip()
         if convo_memory:
             parts.append(f"## Personal Context (Claude's Memory)\n\n{convo_memory}")
 
-        # Project-specific memories
         project_memories = mem_block.get("project_memories", [])
         for proj in project_memories:
             if not isinstance(proj, dict):
@@ -278,17 +231,8 @@ def _format_claude_memories(memories: list[dict]) -> str:
 
 def _format_claude_projects(projects: list[dict]) -> str:
     """
-    Format Claude's projects.json export.
-
-    Structure: [{
-      "name": "Project Name",
-      "description": "...",
-      "docs": [{"filename": "...", "content": "..."}],
-      "prompt_template": "..."
-    }]
-
-    Project docs often contain instructions, guides, and reference material —
-    great knowledge base content.
+    Format Claude's projects.json export — the docs are usually guides
+    and reference material, great knowledge base content.
     """
     parts = []
 
@@ -329,14 +273,8 @@ def _format_claude_projects(projects: list[dict]) -> str:
 
 def _format_chat_records(records: list[dict]) -> str:
     """
-    Convert a list of chat message dicts into readable conversation text.
-
-    Handles common field names:
-      - role/sender/from → the speaker
-      - content/text/message/body → what they said
-
-    Conversations are separated by double newlines so the chunker
-    can split on conversation boundaries naturally.
+    Turn a list of chat message dicts into readable "Speaker: text" lines,
+    handling the common field name variations.
     """
     role_keys = ("role", "sender", "from", "author", "speaker")
     content_keys = ("content", "text", "message", "body", "value")
@@ -365,13 +303,7 @@ def _format_chat_records(records: list[dict]) -> str:
 
 
 def load_pdf_file(file_path: Path) -> str:
-    """
-    Load text from a PDF using PyMuPDF.
-
-    PyMuPDF (imported as 'fitz') is fast and handles most PDFs well.
-    For PDFs with complex layouts (multi-column, tables), results may
-    vary — that's a known limitation of all PDF parsers.
-    """
+    """Load PDF text with PyMuPDF. Complex layouts (columns, tables) may get messy."""
     import fitz  # PyMuPDF
 
     pages = []
@@ -384,13 +316,7 @@ def load_pdf_file(file_path: Path) -> str:
 
 
 def load_docx_file(file_path: Path) -> str:
-    """
-    Load text from a Word document using python-docx.
-
-    Extracts paragraph text in order. Doesn't handle complex formatting
-    (tables, images, headers/footers) — just the body text, which is
-    exactly what we need for knowledge base ingestion.
-    """
+    """Load Word doc body text (no tables, images, or headers — don't need them)."""
     from docx import Document
 
     doc = Document(str(file_path))
@@ -398,7 +324,6 @@ def load_docx_file(file_path: Path) -> str:
     return "\n\n".join(paragraphs)
 
 
-# Map file extensions to their loaders
 LOADERS = {
     ".txt": load_text_file,
     ".md": load_text_file,
@@ -444,25 +369,21 @@ def get_chroma_collection() -> chromadb.Collection:
     Get (or create) our ChromaDB collection.
 
     ChromaDB stores data in a local SQLite database on disk. Each
-    "collection" is like a table — we use one called "personal_knowledge"
+    "collection" is like a table. We use one called "personal_knowledge"
     for all our documents. The data persists across restarts.
     """
     client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
     collection = client.get_or_create_collection(
         name=retrieval_config.collection_name,
-        metadata={"hnsw:space": "cosine"},  # Use cosine similarity for search
+        metadata={"hnsw:space": "cosine"},
     )
     return collection
 
 
 def generate_chunk_id(source: str, chunk_index: int) -> str:
     """
-    Generate a deterministic ID for each chunk.
-
-    Using a hash of source + index means re-ingesting the same file
-    produces the same IDs, so ChromaDB can upsert (update or insert)
-    rather than creating duplicates. This is important — you want to
-    be able to re-run ingestion without worrying about duplicate chunks.
+    Deterministic ID (hash of source + index) so re-ingesting the same
+    file upserts instead of creating duplicates.
     """
     raw = f"{source}::chunk_{chunk_index}"
     return hashlib.md5(raw.encode()).hexdigest()
@@ -478,8 +399,7 @@ def ingest_file(
     embedder: OllamaEmbedder,
 ) -> int:
     """
-    Ingest a single file: load → chunk → embed → store.
-
+    Ingest one file: load → chunk → embed → store.
     Returns the number of chunks created.
     """
     suffix = file_path.suffix.lower()
@@ -508,9 +428,9 @@ def ingest_file(
     try:
         source_name = str(file_path.resolve().relative_to(KNOWLEDGE_BASE_DIR.resolve()))
     except ValueError:
-        # File is outside the knowledge base dir — use just the filename
+        # File lives outside the knowledge base dir
         source_name = file_path.name
-    batch_size = 500  # Conservative — well under ChromaDB's limit, keeps memory reasonable
+    batch_size = 500  # well under ChromaDB's limit, keeps memory reasonable
     total = len(chunks)
 
     for batch_start in range(0, total, batch_size):
@@ -536,7 +456,6 @@ def ingest_file(
             for i in range(batch_start, batch_end)
         ]
 
-        # Upsert = update if exists, insert if new
         collection.upsert(
             ids=batch_ids,
             documents=batch_chunks,
@@ -576,7 +495,6 @@ def ingest_directory(
     directory = directory or KNOWLEDGE_BASE_DIR
     file_types = file_types or list(LOADERS.keys())
 
-    # Gather all matching files
     files = []
     for ext in file_types:
         files.extend(directory.rglob(f"*{ext}"))
@@ -618,7 +536,6 @@ def ingest_directory(
             finally:
                 progress.advance(task)
 
-    # Summary
     console.print(f"\n[bold green]Ingestion complete![/bold green]")
     console.print(f"  Files processed: {len(files)}")
     console.print(f"  Chunks created:  {total_chunks}")

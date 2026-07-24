@@ -1,27 +1,8 @@
 """
-Chat Module — the brain that ties RAG retrieval to LLM generation.
+Chat module — ties RAG retrieval to Ollama generation.
 
-HOW IT WORKS:
-─────────────
-User types a question
-        │
-        ▼
-Retriever searches your knowledge base for relevant chunks
-        │
-        ▼
-Prompt builder combines: system prompt + retrieved context + user question
-        │
-        ▼
-Ollama generates a response using your local LLM
-        │
-        ▼
-Response is streamed back to the terminal in real-time
-
-The "smart" part is deciding WHETHER to use RAG at all. For general
-conversation ("tell me a joke"), we skip retrieval. For knowledge
-questions ("what does our MLX guide say about training times?"),
-we retrieve first. Right now this is controlled by a simple keyword
-check and a /rag toggle — but you could get fancier with a classifier.
+Retrieve relevant chunks, build the prompt, stream the response.
+RAG is toggled with /rag (a classifier could make this smarter someday).
 """
 
 import ollama
@@ -39,17 +20,8 @@ console = Console()
 
 class ChatAssistant:
     """
-    Personal AI assistant with RAG-enhanced responses.
-
-    This is the main orchestrator. It manages:
-    - Conversation history (for multi-turn context)
-    - RAG retrieval (searching your knowledge base)
-    - LLM generation (via Ollama)
-    - Response formatting
-
-    Usage:
-        assistant = ChatAssistant()
-        assistant.run()  # Starts the interactive chat loop
+    The main orchestrator — conversation history, RAG retrieval, and
+    Ollama generation. Call run() for the interactive loop.
     """
 
     def __init__(
@@ -62,13 +34,12 @@ class ChatAssistant:
         self.conversation_history: list[dict] = []
         self._client = ollama.Client(host=ollama_config.base_url)
 
-        # Initialize retriever (loads the reranker model)
         if self.rag_enabled:
             self.retriever = Retriever()
         else:
             self.retriever = None
 
-        # Conversation logger — saves exchanges for future fine-tuning
+        # Saves exchanges for future fine-tuning
         self.logger = ConversationLogger(model=self.model)
 
     def _build_messages(
@@ -77,25 +48,13 @@ class ChatAssistant:
         context_chunks: list[RetrievedChunk] | None = None,
     ) -> list[dict]:
         """
-        Build the message array for the Ollama API call.
-
-        The structure follows the chat API format:
-        [
-            {"role": "system", "content": "...system prompt..."},
-            {"role": "user", "content": "...previous user message..."},
-            {"role": "assistant", "content": "...previous response..."},
-            {"role": "user", "content": "...current question with context..."},
-        ]
-
-        If RAG found relevant chunks, they're injected into the current
-        user message via the context_template from config.
+        Build the chat API message array. If RAG found relevant chunks,
+        they get injected into the current user message via context_template.
         """
         messages = [{"role": "system", "content": prompt_config.system_prompt}]
 
-        # Add conversation history (keeps multi-turn context alive)
         messages.extend(self.conversation_history)
 
-        # Build the current user message (with or without RAG context)
         if context_chunks:
             context_str = self.retriever.format_context(context_chunks)
             user_message = prompt_config.context_template.format(
@@ -110,13 +69,7 @@ class ChatAssistant:
         return messages
 
     def _stream_response(self, messages: list[dict]) -> str:
-        """
-        Send messages to Ollama and stream the response token-by-token.
-
-        Streaming means you see the response as it's generated, not all
-        at once after a long wait. This makes the assistant feel much
-        more responsive, especially for longer answers.
-        """
+        """Send messages to Ollama and stream the response token-by-token."""
         full_response = ""
 
         try:
@@ -142,32 +95,22 @@ class ChatAssistant:
                 console.print(f"\n[red]Error from Ollama: {e}[/red]")
             return full_response or ""
 
-        # Newline after the streamed response
         console.print()
 
         return full_response
 
     def ask(self, query: str, force_rag: bool = None) -> str:
         """
-        Ask the assistant a question and get a response.
-
-        Args:
-            query:     The user's question
-            force_rag: Override RAG behavior (True = always retrieve,
-                       False = never retrieve, None = auto-decide)
-
-        Returns:
-            The assistant's response text
+        Ask a question, get a response. force_rag overrides the RAG
+        setting for this one call (None = use current setting).
         """
         use_rag = force_rag if force_rag is not None else self.rag_enabled
         context_chunks = None
 
-        # ── RAG Retrieval ─────────────────────────────────────────
         if use_rag and self.retriever:
             context_chunks = self.retriever.search(query)
 
             if context_chunks:
-                # Show the user what sources we found
                 sources = set(c.source for c in context_chunks)
                 top_score = max(c.rerank_score for c in context_chunks if c.rerank_score)
                 console.print(
@@ -178,17 +121,14 @@ class ChatAssistant:
             else:
                 console.print("[dim]📚 No relevant context found — using general knowledge[/dim]")
 
-        # ── Generate Response ─────────────────────────────────────
         messages = self._build_messages(query, context_chunks)
         response = self._stream_response(messages)
 
-        # ── Update Conversation History ───────────────────────────
-        # Store the ORIGINAL query (not the context-injected version)
-        # so conversation history stays clean and readable
+        # Store the ORIGINAL query, not the context-injected version,
+        # so history stays clean
         self.conversation_history.append({"role": "user", "content": query})
         self.conversation_history.append({"role": "assistant", "content": response})
 
-        # ── Log for future fine-tuning ──────────────────────────
         sources = [c.source for c in context_chunks] if context_chunks else []
         self.logger.log_exchange(
             user_message=query,
@@ -197,7 +137,7 @@ class ChatAssistant:
             sources=list(set(sources)),
         )
 
-        # Keep history manageable (last 10 turns = 20 messages)
+        # Cap history at the last 10 turns
         max_history = 20
         if len(self.conversation_history) > max_history:
             self.conversation_history = self.conversation_history[-max_history:]
@@ -243,19 +183,16 @@ class ChatAssistant:
 
         while True:
             try:
-                # Get user input
                 console.print()
                 query = console.input("[bold green]You:[/bold green] ").strip()
 
                 if not query:
                     continue
 
-                # ── Handle Commands ───────────────────────────────
                 if query.startswith("/"):
                     self._handle_command(query)
                     continue
 
-                # ── Ask the assistant ─────────────────────────────
                 console.print(f"\n[bold blue]Assistant:[/bold blue]")
                 self.ask(query)
 
@@ -305,7 +242,7 @@ class ChatAssistant:
 
         elif cmd == "/model":
             if arg:
-                # Verify the model exists in Ollama before switching
+                # Make sure it exists in Ollama before switching
                 try:
                     self._client.show(arg)
                     self.model = arg
@@ -324,7 +261,6 @@ class ChatAssistant:
             console.print(f"  Exchanges so far: {self.logger.exchange_count}")
             console.print(f"  Logs directory: data/conversations/")
 
-            # Count total across all sessions
             from pathlib import Path
             all_logs = list(self.logger.log_file.parent.glob("*.jsonl"))
             console.print(f"  Total session files: {len(all_logs)}")
