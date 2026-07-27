@@ -106,6 +106,7 @@ def cmd_evaluate(args):
     return run_evaluation(
         results_path=args.results,
         run_test_first=args.fresh,
+        score_base=args.base,
     )
 
 
@@ -207,6 +208,10 @@ examples:
     p_evaluate.add_argument(
         "--fresh", "-f", action="store_true",
         help="Run test first to generate fresh comparison results",
+    )
+    p_evaluate.add_argument(
+        "--base", "-b", action="store_true",
+        help="Score the base model responses instead of fine-tuned (saves to eval_results_base.json)",
     )
     p_evaluate.set_defaults(func=cmd_evaluate)
 

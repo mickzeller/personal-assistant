@@ -137,21 +137,24 @@ def evaluate_response(
     return result
 
 
-def evaluate_comparison(results: list[dict]) -> dict:
+def evaluate_comparison(results: list[dict], response_key: str = "finetuned_response") -> dict:
     """
-    Evaluate all fine-tuned responses from a comparison run.
+    Evaluate one side of a comparison run (fine-tuned by default, or base).
 
     Args:
-        results: List of comparison result dicts (from model_tester.py)
+        results:      List of comparison result dicts (from model_tester.py)
+        response_key: Which response column to score — "finetuned_response" or "base_response"
 
     Returns:
         Full evaluation report with per-response scores and summary
     """
     evaluations = []
+    side = "Fine-Tuned" if response_key == "finetuned_response" else "Base Model"
 
     console.print(Panel(
         f"[bold]Writing Style Evaluation — Claude as Judge[/bold]\n\n"
         f"Judge model:  [cyan]{eval_config.claude_model}[/cyan]\n"
+        f"Scoring:      [cyan]{side} responses[/cyan]\n"
         f"Responses:    [cyan]{len(results)} test scenarios[/cyan]\n"
         f"Dimensions:   [cyan]{', '.join(d['name'] for d in RUBRIC_DIMENSIONS.values())}[/cyan]",
         border_style="blue",
@@ -160,7 +163,7 @@ def evaluate_comparison(results: list[dict]) -> dict:
     for i, result in enumerate(results):
         context = result["context"]
         prompt = result["prompt"]
-        response = result["finetuned_response"]
+        response = result[response_key]
 
         if response.startswith("[Error:"):
             console.print(f"  [yellow]Skipping test {i+1} (error response)[/yellow]")
@@ -222,8 +225,13 @@ def evaluate_comparison(results: list[dict]) -> dict:
             "date": datetime.now().strftime("%Y-%m-%d"),
             "timestamp": datetime.now().isoformat(),
             "judge_model": eval_config.claude_model,
-            "evaluated_model": finetune_config.ollama_model_name,
-            "adapter_path": finetune_config.adapter_path,
+            "response_key": response_key,
+            "evaluated_model": (
+                finetune_config.ollama_model_name
+                if response_key == "finetuned_response"
+                else finetune_config.base_model
+            ),
+            "adapter_path": finetune_config.adapter_path if response_key == "finetuned_response" else None,
         },
         "results": evaluations,
         "summary": summary,
@@ -315,6 +323,8 @@ def _save_results(report: dict, output_path: Path) -> None:
 def run_evaluation(
     results_path: str = None,
     run_test_first: bool = False,
+    score_base: bool = False,
+    output_path: str = None,
 ) -> bool:
     """
     Main entry point for the evaluation pipeline.
@@ -322,6 +332,10 @@ def run_evaluation(
     Args:
         results_path: Path to comparison_results.json (default: from config)
         run_test_first: If True, run model_tester first to generate fresh results
+        score_base: If True, score the base model responses instead of fine-tuned
+                    (saved to a separate file so the fine-tuned baseline is kept)
+        output_path: Where to save the eval report (default: from config,
+                     with a _base suffix when score_base is set)
 
     Returns:
         True if evaluation completed successfully
@@ -331,7 +345,13 @@ def run_evaluation(
     comparison_path = Path(results_path) if results_path else (
         data_dir / eval_config.comparison_results_filename
     )
-    output_path = data_dir / eval_config.eval_results_filename
+    if output_path:
+        output_path = Path(output_path)
+    elif score_base:
+        stem = Path(eval_config.eval_results_filename)
+        output_path = data_dir / f"{stem.stem}_base{stem.suffix}"
+    else:
+        output_path = data_dir / eval_config.eval_results_filename
 
     # Optionally generate fresh comparison results
     if run_test_first:
@@ -352,7 +372,8 @@ def run_evaluation(
     console.print(f"[dim]Loaded {len(comparison_results)} comparison results from {comparison_path}[/dim]\n")
 
     # Run evaluation
-    report = evaluate_comparison(comparison_results)
+    response_key = "base_response" if score_base else "finetuned_response"
+    report = evaluate_comparison(comparison_results, response_key=response_key)
 
     if not report:
         return False

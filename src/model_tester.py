@@ -19,6 +19,40 @@ from src.training_data_parser import SYSTEM_PROMPT
 
 console = Console()
 
+# Eval prompts live in data/ (gitignored — they describe personal scenarios).
+# Falls back to the small built-in set in configs/config.py if missing.
+EVAL_PROMPTS_PATH = PROJECT_ROOT / "data" / "eval" / "eval_prompts.json"
+
+# Loaded models keyed by adapter path — loading Llama 3.1 8B from disk takes
+# ~10s, and a 50-prompt run would otherwise reload it on every generation.
+# Base + adapter cached together is ~9GB at 4-bit, fine on 64GB.
+_model_cache: dict[str, tuple] = {}
+
+
+def load_eval_prompts() -> list[dict]:
+    """Load the eval prompt set, falling back to the built-in test prompts."""
+    if EVAL_PROMPTS_PATH.exists():
+        with open(EVAL_PROMPTS_PATH, encoding="utf-8") as f:
+            prompts = json.load(f)
+        valid = [p for p in prompts if isinstance(p, dict) and p.get("prompt")]
+        if valid:
+            console.print(f"[dim]Loaded {len(valid)} eval prompts from {EVAL_PROMPTS_PATH}[/dim]")
+            return valid
+        console.print(f"[yellow]No valid prompts in {EVAL_PROMPTS_PATH}, using built-in set[/yellow]")
+    return finetune_config.test_prompts
+
+
+def _load_model(adapter_path: str = None) -> tuple:
+    from mlx_lm import load
+
+    key = adapter_path or "__base__"
+    if key not in _model_cache:
+        if adapter_path:
+            _model_cache[key] = load(finetune_config.base_model, adapter_path=adapter_path)
+        else:
+            _model_cache[key] = load(finetune_config.base_model)
+    return _model_cache[key]
+
 
 def generate_response_mlx(
     prompt: str,
@@ -26,6 +60,7 @@ def generate_response_mlx(
     adapter_path: str = None,
     max_tokens: int = 512,
     temp: float = 0.7,
+    use_system_prompt: bool = True,
 ) -> str:
     """
     Generate a response using MLX-LM directly (no Ollama).
@@ -44,7 +79,7 @@ def generate_response_mlx(
         temp:         Sampling temperature (0.7 = creative but coherent)
     """
     try:
-        from mlx_lm import load, generate
+        from mlx_lm import generate
         from mlx_lm.sample_utils import make_sampler
     except ImportError:
         console.print("[red]mlx-lm not installed. Run: pip install 'mlx-lm>=0.30.0'[/red]")
@@ -53,18 +88,12 @@ def generate_response_mlx(
     # Build the chat-formatted prompt
     user_content = f"Context: {context}\n\nTask: {prompt}" if context else prompt
 
-    # Load model (with or without adapter)
-    model_path = finetune_config.base_model
-    if adapter_path:
-        model, tokenizer = load(model_path, adapter_path=adapter_path)
-    else:
-        model, tokenizer = load(model_path)
+    model, tokenizer = _load_model(adapter_path)
 
     # Build chat messages using the tokenizer's chat template
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    messages = [{"role": "user", "content": user_content}]
+    if use_system_prompt:
+        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
     # Apply chat template to get the formatted prompt string
     if hasattr(tokenizer, "apply_chat_template"):
@@ -73,9 +102,12 @@ def generate_response_mlx(
         )
     else:
         # Fallback: manual Llama 3.1 formatting
+        system_part = (
+            f"<|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_PROMPT}<|eot_id|>"
+            if use_system_prompt else ""
+        )
         formatted_prompt = (
-            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
-            f"{SYSTEM_PROMPT}<|eot_id|>"
+            f"<|begin_of_text|>{system_part}"
             f"<|start_header_id|>user<|end_header_id|>\n\n"
             f"{user_content}<|eot_id|>"
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -99,6 +131,7 @@ def run_comparison(
     adapter_path: str = None,
     output_path: Path = None,
     prompts: list[dict] = None,
+    use_system_prompt: bool = True,
 ) -> list[dict]:
     """
     Run A/B comparison between base model and fine-tuned model.
@@ -119,7 +152,7 @@ def run_comparison(
     if output_path is None:
         output_path = PROJECT_ROOT / finetune_config.data_dir / "comparison_results.json"
     if prompts is None:
-        prompts = finetune_config.test_prompts
+        prompts = load_eval_prompts()
 
     adapter_dir = Path(adapter_path)
     if not adapter_dir.exists():
@@ -152,6 +185,7 @@ def run_comparison(
                 prompt=prompt,
                 context=context,
                 adapter_path=None,
+                use_system_prompt=use_system_prompt,
             )
             base_time = time.time() - start
         except Exception as e:
@@ -166,6 +200,7 @@ def run_comparison(
                 prompt=prompt,
                 context=context,
                 adapter_path=adapter_path,
+                use_system_prompt=use_system_prompt,
             )
             ft_time = time.time() - start
         except Exception as e:
@@ -191,6 +226,7 @@ def run_comparison(
 
         results.append({
             "test_number": i + 1,
+            "category": test.get("category", ""),
             "context": context,
             "prompt": prompt,
             "base_response": base_response,
