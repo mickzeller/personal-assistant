@@ -89,13 +89,11 @@ def train_model() -> bool:
     ))
 
     prepared_dir = PROJECT_ROOT / finetune_config.prepared_dir
-    train_file = prepared_dir / "train.jsonl"
-    valid_file = prepared_dir / "valid.jsonl"
 
-    if not train_file.exists() or not valid_file.exists():
-        console.print("[yellow]Prepared data not found. Running data preparation first...[/yellow]\n")
-        if not prepare_data():
-            return False
+    # Always re-prepare — it's ~1s, and stale files from another family
+    # (different system-prompt handling) would quietly break training
+    if not prepare_data():
+        return False
 
     adapter_path = PROJECT_ROOT / finetune_config.adapter_path
     adapter_path.mkdir(parents=True, exist_ok=True)
@@ -358,8 +356,17 @@ Step-by-step workflow:
         "--all", action="store_true",
         help="Run full pipeline: prepare → train → test → export",
     )
+    parser.add_argument(
+        "--model-family", "-M",
+        choices=["llama", "mistral"],
+        default="llama",
+        help="Base model family (default: llama)",
+    )
 
     args = parser.parse_args()
+
+    from configs.config import use_model_family
+    use_model_family(args.model_family)
 
     if args.prepare:
         success = prepare_data()

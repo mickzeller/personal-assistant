@@ -17,20 +17,23 @@ PATH A (Preferred - Convert Adapter to PEFT Format):
 
   This keeps the adapter separate (~21MB) and is the fastest path.
 
-PATH B (Fallback — Fuse + GGUF):
+PATH B (Fallback — Fuse + Import):
   If PEFT import fails, we fuse the adapter INTO the base model
-  weights, then convert to GGUF format for Ollama:
+  weights, then import the full model:
     1. Load base model + adapter, merge weights (mlx_lm)
     2. De-quantize from 4-bit back to fp16
-    3. Save fused model, create Ollama model from safetensors
+    3. Create Ollama model from safetensors — or via GGUF for families
+       Ollama can't import directly (needs_gguf_export)
 
-  Path B produces a full standalone model (~8GB) but is the most reliable.
+  Slower than Path A but the most reliable. Cleans up its ~29GB of
+  fp16 intermediates after a successful import.
 
 IMPORTANT: Both paths require the Ollama base model to be pulled first.
 Make sure `ollama pull llama3.1:8b-instruct-q8_0` has been run.
 """
 
 import json
+import os
 import subprocess
 import shutil
 import sys
@@ -43,6 +46,9 @@ from configs.config import PROJECT_ROOT, finetune_config
 from src.training_data_parser import SYSTEM_PROMPT
 
 console = Console()
+
+# llama.cpp checkout for GGUF conversion — just the scripts, no build needed
+LLAMACPP_DIR = Path(os.environ.get("LLAMACPP_DIR", str(Path.home() / ".cache" / "llama.cpp")))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -90,6 +96,38 @@ def _ensure_base_model(base_model: str) -> bool:
     return True
 
 
+def _get_base_template(base_model: str) -> str | None:
+    """Copy the chat template from the pulled base model — beats hardcoding it per family."""
+    try:
+        result = subprocess.run(
+            ["ollama", "show", base_model, "--template"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.rstrip("\n")
+    except Exception:
+        pass
+    return None
+
+
+def _get_base_stop_params(base_model: str) -> list[str]:
+    """Read the base model's stop parameters (lines like: stop  "[INST]")."""
+    stops = []
+    try:
+        result = subprocess.run(
+            ["ollama", "show", base_model, "--parameters"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[0] == "stop":
+                    stops.append(parts[1].strip().strip('"'))
+    except Exception:
+        pass
+    return stops
+
+
 def _write_modelfile(
     modelfile_path: Path,
     from_source: str,
@@ -97,7 +135,7 @@ def _write_modelfile(
     adapter_path: Path = None,
 ) -> Path:
     """
-    Write an Ollama Modelfile with the full Llama 3.1 chat template.
+    Write an Ollama Modelfile with the base model's full chat template.
 
     Args:
         modelfile_path: Where to write the Modelfile
@@ -105,10 +143,10 @@ def _write_modelfile(
         system_prompt:  System prompt to bake into the model
         adapter_path:   Optional ADAPTER directive (for PEFT adapter import)
 
-    IMPORTANT: When importing safetensors into Ollama, the Llama 3.1 chat
-    template is NOT auto-detected. Without the full TEMPLATE directive,
-    the model gets {{ .Prompt }} which breaks chat UIs completely.
-    The model won't know when to stop generating and will loop forever.
+    IMPORTANT: Ollama doesn't auto-detect chat templates on import. Without
+    the full TEMPLATE directive the model gets bare {{ .Prompt }}, ignores
+    stop tokens, and loops forever. We copy the template + stop params from
+    the pulled base model via `ollama show`, with hardcoded fallbacks.
     """
     # Copied from: ollama show llama3.1:8b-instruct-q8_0 --modelfile
     LLAMA31_TEMPLATE = """{{- if or .System .Tools }}<|start_header_id|>system<|end_header_id|>
@@ -160,10 +198,32 @@ Question: {{ .Content }}<|eot_id|>
 {{- end }}
 {{- end }}"""
 
+    # Legacy .System/.Prompt form — Ollama maps chat messages through it fine
+    MISTRAL_TEMPLATE = """[INST] {{ if .System }}{{ .System }}
+
+{{ end }}{{ .Prompt }} [/INST]"""
+
+    FALLBACKS = {
+        "llama": (LLAMA31_TEMPLATE, ["<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"]),
+        "mistral": (MISTRAL_TEMPLATE, ["[INST]", "[/INST]"]),
+    }
+
+    base_model = finetune_config.ollama_base_model
+    template = _get_base_template(base_model)
+    stops = _get_base_stop_params(base_model)
+
+    if template is None:
+        family = finetune_config.model_family
+        console.print(
+            f"  [yellow]Couldn't read template from '{base_model}' — "
+            f"falling back to the built-in {family} template[/yellow]"
+        )
+        template, stops = FALLBACKS[family]
+
     lines = [
-        "# Fine-tuned Llama 3.1 8B with a personal writing style",
+        f"# Fine-tuned {base_model} with a personal writing style",
         "# Generated by the LLM Discovery fine-tuning pipeline",
-        "# Includes the proper Llama 3.1 chat template (critical for app compatibility)",
+        "# Includes the base model's chat template (critical for app compatibility)",
         "",
         f"FROM {from_source}",
     ]
@@ -173,13 +233,13 @@ Question: {{ .Content }}<|eot_id|>
 
     lines.extend([
         "",
-        f'TEMPLATE """{LLAMA31_TEMPLATE}"""',
+        f'TEMPLATE """{template}"""',
         "",
         f'SYSTEM """{system_prompt}"""',
         "",
-        "PARAMETER stop <|start_header_id|>",
-        "PARAMETER stop <|end_header_id|>",
-        "PARAMETER stop <|eot_id|>",
+    ])
+    lines.extend(f'PARAMETER stop "{stop}"' for stop in stops)
+    lines.extend([
         f"PARAMETER temperature {finetune_config.temperature}",
         "PARAMETER top_p 0.9",
         "",
@@ -303,7 +363,7 @@ def _convert_mlx_to_peft(
     peft_config = {
         "alpha_pattern": {},
         "auto_mapping": None,
-        "base_model_name_or_path": "meta-llama/Llama-3.1-8B-Instruct",
+        "base_model_name_or_path": finetune_config.hf_base_model,
         "bias": "none",
         "fan_in_fan_out": False,
         "inference_mode": True,
@@ -399,6 +459,66 @@ def export_path_a(
     return success
 
 
+def _convert_to_gguf(fused_path: Path, gguf_file: Path) -> bool:
+    """
+    Fused safetensors → f16 GGUF via llama.cpp's converter.
+
+    Ollama can't import Mistral safetensors directly (and the relabel-as-Llama
+    trick mangles the tokenizer). GGUF is the route that actually works.
+    """
+    converter = LLAMACPP_DIR / "convert_hf_to_gguf.py"
+    if not converter.exists():
+        console.print(f"[red]llama.cpp converter not found: {converter}[/red]")
+        console.print(
+            "[dim]Get it with: git clone --depth 1 "
+            "https://github.com/ggml-org/llama.cpp ~/.cache/llama.cpp[/dim]"
+        )
+        return False
+
+    gguf_file.parent.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Converting {fused_path.name} → {gguf_file.name}...[/dim]")
+
+    # gguf-py ships inside the llama.cpp repo — PYTHONPATH beats pip installing it
+    env = {**os.environ, "PYTHONPATH": str(LLAMACPP_DIR / "gguf-py")}
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, str(converter), str(fused_path),
+                "--outfile", str(gguf_file),
+                "--outtype", "f16",
+            ],
+            capture_output=True, text=True, timeout=1800, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        console.print("[red]GGUF conversion timed out (>30 min).[/red]")
+        return False
+
+    if result.returncode != 0:
+        error_msg = (result.stderr or result.stdout).strip()
+        console.print(f"[red]GGUF conversion failed: ...{error_msg[-500:]}[/red]")
+        return False
+
+    size_gb = gguf_file.stat().st_size / 1e9
+    console.print(f"  [green]✓[/green] GGUF written: {gguf_file} ({size_gb:.1f} GB)")
+    return True
+
+
+def _cleanup_intermediates(paths: list[Path]) -> None:
+    """The fp16 intermediates are ~29GB and fully reproducible. Ask the disk that hit 99%."""
+    freed = 0
+    for p in paths:
+        if not p.exists():
+            continue
+        if p.is_dir():
+            freed += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            shutil.rmtree(p)
+        else:
+            freed += p.stat().st_size
+            p.unlink()
+    if freed:
+        console.print(f"  [dim]Cleaned up intermediates: {freed / 1e9:.1f} GB freed[/dim]")
+
+
 # ──────────────────────────────────────────────────────────────
 # Path B: Fuse + Save as Full Model → Ollama
 # ──────────────────────────────────────────────────────────────
@@ -434,6 +554,14 @@ def export_path_b(
     if not adapter_path.exists():
         console.print(f"[red]Adapter not found: {adapter_path}[/red]")
         return False
+
+    # Base model is only needed for its template here — the fused weights
+    # ARE the model, and there's a built-in fallback template if the pull fails
+    if not _ensure_base_model(finetune_config.ollama_base_model):
+        console.print(
+            "[yellow]Couldn't pull the base model — using the "
+            "built-in fallback template.[/yellow]"
+        )
 
     console.print("\n[bold]Step 1/2: Fusing adapter into base model...[/bold]")
     console.print("[dim]This loads the model + adapter, de-quantizes to fp16, and saves[/dim]")
@@ -471,6 +599,27 @@ def export_path_b(
         console.print(f"[red]Fusion failed: {e}[/red]")
         return False
 
+    # Some families (Mistral) have to take the GGUF detour
+    if finetune_config.needs_gguf_export:
+        gguf_dir = PROJECT_ROOT / finetune_config.gguf_path
+        gguf_file = gguf_dir / f"{fused_path.name}-f16.gguf"
+
+        console.print("\n[bold]Step 2/3: Converting fused model to GGUF...[/bold]")
+        if not _convert_to_gguf(fused_path, gguf_file):
+            return False
+
+        console.print("\n[bold]Step 3/3: Creating Ollama model (Q8_0 quantized)...[/bold]")
+        modelfile_path = gguf_dir / "Modelfile"
+        _write_modelfile(
+            modelfile_path=modelfile_path,
+            from_source=str(gguf_file),
+            system_prompt=SYSTEM_PROMPT,
+        )
+        success = _ollama_create(model_name, modelfile_path, quantize="q8_0")
+        if success:
+            _cleanup_intermediates([fused_path, gguf_file])
+        return success
+
     # Step 2: Create Ollama model from fused safetensors
     # Use q8_0 quantization — fused model is fp16 (~16GB) which is too large.
     # q8_0 gives us ~8.5GB with minimal quality loss.
@@ -483,7 +632,10 @@ def export_path_b(
         system_prompt=SYSTEM_PROMPT,
     )
 
-    return _ollama_create(model_name, modelfile_path, quantize="q8_0")
+    success = _ollama_create(model_name, modelfile_path, quantize="q8_0")
+    if success:
+        _cleanup_intermediates([fused_path])
+    return success
 
 
 # ──────────────────────────────────────────────────────────────

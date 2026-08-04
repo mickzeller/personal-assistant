@@ -90,10 +90,15 @@ def generate_response_mlx(
 
     model, tokenizer = _load_model(adapter_path)
 
-    # Build chat messages using the tokenizer's chat template
-    messages = [{"role": "user", "content": user_content}]
+    # No system role (Mistral)? Fold it into the user turn,
+    # same as the training data — the two must match
+    messages = []
     if use_system_prompt:
-        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        if finetune_config.supports_system_role:
+            messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        else:
+            user_content = f"{SYSTEM_PROMPT}\n\n{user_content}"
+    messages.append({"role": "user", "content": user_content})
 
     # Apply chat template to get the formatted prompt string
     if hasattr(tokenizer, "apply_chat_template"):
@@ -150,7 +155,10 @@ def run_comparison(
     if adapter_path is None:
         adapter_path = str(PROJECT_ROOT / finetune_config.adapter_path)
     if output_path is None:
-        output_path = PROJECT_ROOT / finetune_config.data_dir / "comparison_results.json"
+        output_path = (
+            PROJECT_ROOT / finetune_config.data_dir
+            / f"comparison_results{finetune_config.results_suffix}.json"
+        )
     if prompts is None:
         prompts = load_eval_prompts()
 

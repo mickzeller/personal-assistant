@@ -21,14 +21,14 @@ A hands-on project exploring open-source LLMs, fine-tuning, and RAG, running ent
 
 ## Contents
 
-[What This Project Does](#what-this-project-does) · [Quick Start](#quick-start) · [Documentation](#documentation) · [The Stack](#the-stack) · [Project Structure](#project-structure) · [Lessons Learned](#lessons-learned) · [Training History](#training-history) · [Hardware](#hardware) · [Cost](#cost) · [What's Next](#whats-next)
+[What This Project Does](#what-this-project-does) · [Quick Start](#quick-start) · [Model Families](#model-families) · [Documentation](#documentation) · [The Stack](#the-stack) · [Project Structure](#project-structure) · [Lessons Learned](#lessons-learned) · [Training History](#training-history) · [Hardware](#hardware) · [Cost](#cost) · [What's Next](#whats-next)
 
 ## What This Project Does
 
 | Component                     | What it does                                                                                                                                          |
 |-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **RAG Pipeline**              | Ingests personal documents (Markdown, PDF, DOCX, JSON chat exports) into ChromaDB with two-stage retrieval: semantic search + cross-encoder reranking |
-| **Writing Style Fine-Tuning** | MLX LoRA fine-tuning of Llama 3.1 8B to match my communication style across contexts: casual texts, work Slack, community messages, technical writing |
+| **Writing Style Fine-Tuning** | MLX LoRA fine-tuning of Llama 3.1 8B to match my communication style across contexts: casual texts, work Slack, community messages, technical writing. Same recipe runs on Mistral 7B (spoiler: Llama won) |
 | **LLM-as-Judge Evaluation**   | Sends fine-tuned outputs to Claude's API for structured scoring against a writing style rubric. Trackable metrics instead of vibes                    |
 | **Unified CLI**               | One command to rule them all: `python cli.py <command>`                                                                                               |
 
@@ -40,9 +40,21 @@ source .venv/bin/activate
 
 python cli.py --help               # See all commands
 python cli.py pipeline             # Full pipeline: parse → prepare → train → test → export
+python cli.py pipeline -M mistral  # Same pipeline, different base model (see Model Families)
 python cli.py evaluate --fresh     # Generate test responses + score them with Claude
 python cli.py chat                 # Chat with your fine-tuned model
 ```
+
+## Model Families
+
+Every pipeline command takes `-M llama` (default) or `-M mistral`. One preset in `configs/config.py` swaps everything model-specific — base model, adapter paths, iteration count, system-role handling, export route — and suffixes the result files so runs never clobber each other.
+
+```bash
+python cli.py train -M mistral              # trains adapters/writing-style-mistral at 150 iters
+python cli.py evaluate --fresh -M mistral   # scores to eval_results_mistral.json
+```
+
+Mistral's Ollama export needs llama.cpp's GGUF converter: `git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/.cache/llama.cpp` (no build needed). Lesson 8 explains why.
 
 ## Documentation
 
@@ -121,58 +133,68 @@ This was the biggest "aha" moment across three training runs:
 
 **v1 (83 examples):** Included 5 ultra-long examples (1400+ characters: full essays, detailed reviews). The model learned that "being me" means writing novels. Every response was 3x too long with unnecessary buildup and meandering conclusions.
 
-**The fix:** Removed every training example over ~1000 characters. Cap your responses. If you wouldn't actually send a message that long, don't teach the model that you would.
+**The fix:** Cut every example over ~1000 characters. If you wouldn't send a message that long, don't teach the model that you would.
 
 **v2 (142 examples):** Dataset skewed heavily toward excited, high-energy messages (celebration texts, enthusiastic reviews, party announcements). The model concluded that I am ALWAYS excited about EVERYTHING. It produced responses like "AXE-CESSORY ALERT!!" for mundane workplace messages.
 
 **The fix for v3:** Added 89 "chill" everyday examples: "Sounds good", "Yeah I think so", "I'm on it", "You starting to feel better?" The kind of messages that make up 80% of real communication but 0% of what you think to save as writing samples.
 
-The lesson: **your training data is a mirror, and it reflects your biases.** You naturally save your best, most interesting writing: the witty texts, the heartfelt messages, the clever reviews. But that's not representative. Most communication is mundane, and the model needs to know that.
+The lesson: **your training data is a mirror, and it reflects your biases.** You save your best writing — the witty texts, the heartfelt messages — but most real communication is mundane, and the model needs to know that.
 
 ### 3. Temperature Matters More Than You'd Expect
 
 We dropped temperature from 0.7 to 0.5 between v2 and v3, and the difference was dramatic:
 
-- **0.7:** The model amplified enthusiasm from the training data. Every response felt like it was trying too hard: forced humor, excessive energy, words that *almost* sounded right but were just a little too creative.
-- **0.5:** More grounded. The model still captures personality but doesn't overshoot. Natural word choices instead of surprising ones.
+- **0.7:** Trying too hard. Forced humor, excessive energy, words that *almost* sounded right.
+- **0.5:** Grounded. Still has personality, doesn't overshoot.
 
-For style-matching fine-tunes, lower temperature is almost always better. You want the model to reliably reproduce learned patterns, not creatively riff on them.
+For style-matching fine-tunes, lower is almost always better: you want the model reproducing learned patterns, not riffing on them.
 
 ### 4. MLX Adapters and Ollama Adapters Are Not the Same Thing
 
-This one cost hours of debugging. MLX saves LoRA adapters with different tensor keys (`lora_a` vs `lora_A.weight`), transposed shapes, different config schema, and a different filename pattern (`adapters.safetensors` vs `model*.safetensors`). You cannot just point Ollama at an MLX adapter directory.
+This one cost hours. MLX saves LoRA adapters with different tensor keys (`lora_a` vs `lora_A.weight`), transposed shapes, a different config schema, and a different filename pattern. You cannot just point Ollama at an MLX adapter directory.
 
-**The reliable export path (Path B):**
-1. Fuse the adapter into the base model: `python -m mlx_lm fuse`
-2. Dequantize during fusion (`--dequantize`): MLX 4-bit quantization uses a `U32` data type that Ollama can't read
-3. Create the Ollama model with re-quantization: `ollama create --quantize q8_0`
+**The reliable path (Path B):** fuse the adapter into the base model (`python -m mlx_lm fuse --dequantize` — MLX's 4-bit format uses a `U32` type Ollama can't read), then `ollama create --quantize q8_0`. Watch the syntax: it's `python -m mlx_lm fuse`, not `mlx_lm.fuse`, and the flag is `--dequantize`, not `--de-quantize`.
 
-Also: `mlx_lm.fuse` has no `fuse()` function you can import. It's a CLI subcommand: `python -m mlx_lm fuse` (not `python -m mlx_lm.fuse`). And the flag is `--dequantize`, not `--de-quantize`.
-
-Since then the exporter also gained a faster Path A (converting the adapter to PEFT format so Ollama imports it directly, ~21MB instead of ~8GB), with the fuse route above as the fallback. Both paths are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
+The exporter also has a faster Path A (adapter converted to PEFT format, ~21MB instead of ~8GB) with the fuse route as fallback. Both are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
 
 ### 5. Missing Chat Templates Break Everything Silently
 
-When you import safetensors weights into Ollama, the Llama 3.1 chat template is NOT auto-detected. Without it, Ollama falls back to `{{ .Prompt }}`, a bare prompt template that doesn't wrap messages in the `<|start_header_id|>` / `<|end_header_id|>` format the model was trained on.
+When you import weights into Ollama, the chat template is NOT auto-detected. Ollama falls back to a bare `{{ .Prompt }}` template that skips the role formatting the model was trained on. The symptoms are subtle: text still generates, but it feels off — less coherent, instructions ignored, chat UIs broken.
 
-The symptoms are subtle: the model still generates text, but it feels off. Responses are less coherent, instructions get ignored, and chat UIs that depend on proper role formatting break completely.
-
-**The fix:** Always include the full `TEMPLATE` directive in your Modelfile when creating from safetensors. Our `ollama_exporter.py` now permanently bakes in the Llama 3.1 chat template + stop tokens on every export.
+**The fix:** Always include the full `TEMPLATE` directive in the Modelfile. Our exporter now copies the template and stop tokens straight from the pulled base model (`ollama show --template`), so it stays correct for any model family.
 
 ### 6. Evaluation by Vibes Doesn't Scale
 
-For the first three training runs, our evaluation process was: run `python cli.py test`, stare at two side-by-side text panels, and decide "yeah, that sounds like me" or "nah, too formal." This works fine when you're iterating quickly on one model, but it falls apart when you want to:
+For the first three training runs, evaluation was: stare at two side-by-side panels and decide "yeah, that sounds like me." Fine for quick iteration, useless for comparing v2 vs v3, Llama vs Mistral, or convincing yourself you're not just seeing what you want to see.
 
-- Compare v2 vs v3 objectively
-- Compare Llama vs Mistral vs Gemma fine-tunes
-- Track whether adding 50 new training examples actually improved things
-- Convince yourself you're not just seeing what you want to see
+**The fix:** LLM-as-Judge. Each response goes to Claude with a structured rubric (tone, word choice, structure, authenticity, context fit — each 1-5) and my actual writing style profile as reference. Out comes JSON with per-response scores and dimension averages, comparable across runs.
 
-**The fix:** LLM-as-Judge evaluation. We send each model response to Claude with a structured rubric (tone, word choice, structure, authenticity, context fit, each scored 1-5) and my actual writing style profile as reference. The result is a JSON file with per-response scores and dimension averages that we can compare across runs.
+Cost: ~$0.01 per run. Even at 100 runs, we're under a buck.
 
-Cost: ~$0.01 per evaluation run. Even at 100 runs, we're under $1.
+### 7. Not All Instruct Models Speak "System"
 
-### 7. Keep Personal Data Out of Version Control
+Llama takes a system role for granted. Mistral v0.3's chat template straight-up refuses one — it raises `Only user and assistant roles are supported!` and your training run dies on the first batch. The convention for Mistral is folding the system content into the first user message instead.
+
+The subtle part: fold in the SAME places. We fold at training time (data splitter) and at generation time (model tester), both keyed off `supports_system_role` in the presets. If those two disagree, you're scoring the model on a format it never saw — and every number you collect is quietly wrong.
+
+### 8. Ollama Can't Import Every Architecture (Export Saga, Part 2)
+
+Lesson 4 was just the warm-up. `ollama create` from safetensors only supports certain architectures, and Mistral isn't one of them: `unsupported architecture "MistralForCausalLM"`, hard stop.
+
+Fun fact: Mistral 7B v0.3 is architecturally identical to Llama, so relabeling `config.json` to `LlamaForCausalLM` actually imports. Don't. The SentencePiece tokenizer gets mangled on the way in — emojis come out as raw bytes like `<0xF0><0x9F>` and spaces sprout `[UNK_BYTE]` artifacts. Close enough to look right, broken enough to be useless.
+
+The real fix: convert the fused model to GGUF with llama.cpp's `convert_hf_to_gguf.py` (which handles the tokenizer properly), then `ollama create --quantize q8_0` from the .gguf. The exporter does this automatically for families flagged `needs_gguf_export`, and deletes the ~29GB of fp16 intermediates after a successful import. That last part isn't optional — ask the disk that hit 99% mid-export.
+
+### 9. A Better Loss Curve Isn't a Better Model
+
+Mistral's first run (300 iterations) showed textbook overfitting: val loss bottomed at 2.77 around iteration 150, then climbed while train loss kept dropping. Easy fix, right? Retrain and stop at 150, right at the sweet spot.
+
+The judge disagreed: 1.9/5.0 for the overfit run, 1.8/5.0 for the "fixed" one. Same number.
+
+Val loss tells you when the model stops generalizing from your data — it says nothing about how good the ceiling is. Mistral's ceiling for this writing style is just lower than Llama's, and no amount of training-curve hygiene changes that. Pick a better base model before you micro-optimize hyperparameters.
+
+### 10. Keep Personal Data Out of Version Control
 
 The writing style profile (tone descriptions, example messages, vocabulary patterns) is personal data. Not secrets, but not something you want in a public repo either. Our first pass hardcoded it into `configs/eval_config.py`. The refactored version loads it from `~/.claude/CLAUDE.md` at runtime, which keeps a single source of truth and avoids committing personal writing samples.
 
@@ -182,29 +204,37 @@ Same principle applies to training data (`data/` is gitignored), conversation lo
 
 ## Training History
 
-| Version | Examples | Iterations | Temp | Result                                                  |
-|---------|----------|------------|------|---------------------------------------------------------|
-| **v1**  | 83       | 600        | 0.7  | Too verbose: long training examples taught it to ramble |
-| **v2**  | 142      | 400        | 0.7  | Over-enthusiastic: dataset skewed high-energy           |
-| **v3**  | 240      | 300        | 0.5  | Natural: chill examples + lower temp = balanced output  |
+| Version | Model       | Examples | Iterations | Temp | Result                                                  |
+|---------|-------------|----------|------------|------|---------------------------------------------------------|
+| **v1**  | Llama 3.1   | 83       | 600        | 0.7  | Too verbose: long training examples taught it to ramble |
+| **v2**  | Llama 3.1   | 142      | 400        | 0.7  | Over-enthusiastic: dataset skewed high-energy           |
+| **v3**  | Llama 3.1   | 240      | 300        | 0.5  | Natural: chill examples + lower temp = balanced output  |
+| **m1**  | Mistral 7B  | 240      | 300        | 0.5  | Overfit: val loss bottomed at ~iter 150, then climbed   |
+| **m2**  | Mistral 7B  | 240      | 150        | 0.5  | Stopped at the sweet spot — judge score barely moved    |
 
 ### First Eval Scores (v3, Claude as Judge)
 
-| Test                 | Tone | Words | Struct | Auth | Context | Avg |
-|----------------------|------|-------|--------|------|---------|-----|
-| Casual friend text   | 3    | 3     | 4      | 3    | 3       | 3.2 |
-| Workplace (PR bug)   | 3    | 2     | 3      | 2    | 3       | 2.6 |
-| Community thank-you  | 3    | 2     | 3      | 2    | 3       | 2.6 |
-| Online review        | 2    | 2     | 2      | 2    | 3       | 2.2 |
-| Technical (REST API) | 3    | 2     | 3      | 3    | 2       | 2.6 |
-| Birthday to brother  | 3    | 2     | 3      | 3    | 2       | 2.6 |
-| OOO announcement     | 4    | 3     | 4      | 4    | 4       | 3.8 |
+**2.8/5.0 average** across the original 7 test scenarios. Best: the OOO announcement (3.8) — nailed the casual-but-measured work tone. Worst: the online review (2.2) — overshot the enthusiasm ("!!!") and invented details that felt artificial. Not a flattering number, but a real baseline to improve against, which was the whole point of building the judge.
 
-**Overall avg: 2.8/5.0.** The model captures casual energy but overshoots on enthusiasm (the review with "!!!") and sometimes invents details that feel artificial. The OOO message scored highest because it nailed the casual-but-measured work tone. These scores give us a concrete baseline to improve against.
+### Head-to-Head: Llama 3.1 8B vs Mistral 7B v0.3
+
+Same 240 training examples, same hyperparameter philosophy, same 54-prompt eval set, same judge. The only variable is the base model:
+
+| Model                         | Tone | Words | Struct | Auth | Context | Avg     |
+|-------------------------------|------|-------|--------|------|---------|---------|
+| Llama 3.1 8B base             | 3.0  | 2.4   | 3.3    | 2.6  | 3.1     | 2.9     |
+| Llama 3.1 8B fine-tuned       | 2.8  | 2.3   | 3.0    | 2.5  | 3.0     | **2.7** |
+| Mistral 7B fine-tuned (m1)    | 2.0  | 1.9   | 2.0    | 1.8  | 2.0     | **1.9** |
+| Mistral 7B fine-tuned (m2)    | 1.9  | 1.9   | 1.6    | 1.6  | 1.8     | **1.8** |
+
+**Verdict: Llama wins, and it's not close.** Mistral had flashes (a couple of 4s and even a 5.0 on casual texts) but way more variance, including responses that cut off mid-thought. Two honest takeaways:
+
+1. Fixing Mistral's overfitting (m1 → m2) didn't fix its score — the base model's ceiling is the ceiling (lesson 9).
+2. Base Llama actually edges out fine-tuned Llama here (2.9 vs 2.7): the fine-tune wins on style-heavy prompts, loses on structure everywhere else. The eval pipeline caught what vibes-testing missed — which is exactly why it exists.
 
 ## Hardware
 
-Everything runs on a single Apple Silicon Mac, and unified memory is the secret weapon: 64GB is enough to run ~70B models (Q4 quantized) for inference and fine-tune 8B models via MLX, all locally, zero cloud cost. That's the equivalent of a 64GB GPU, which would cost $6,000+ in NVIDIA-land. Smaller machines work too — a 16GB Mac handles the RAG pipeline and 8B inference comfortably; fine-tuning just wants more headroom.
+One Apple Silicon Mac, and unified memory is the secret weapon: 64GB runs ~70B models (Q4) for inference and fine-tunes 8B models via MLX — the equivalent of a 64GB GPU that'd cost $6,000+ in NVIDIA-land. A 16GB Mac handles the RAG pipeline and 8B inference fine; fine-tuning just wants more headroom.
 
 ## Cost
 
@@ -221,7 +251,7 @@ Everything runs on a single Apple Silicon Mac, and unified memory is the secret 
 ## What's Next
 
 - [x] Run first scored evaluation (v3 baseline: 2.8/5.0 — see scores above)
-- [ ] Fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B
+- [x] Fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B (Llama wins, 2.7 vs 1.9 — see head-to-head above)
 - [ ] Add automated style metrics (response length, exclamation density, contraction ratio)
 - [ ] Build Gradio web UI (Phase 4)
 - [ ] Try DPO training with preference pairs (Phase 5)

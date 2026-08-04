@@ -340,18 +340,20 @@ def run_evaluation(
     Returns:
         True if evaluation completed successfully
     """
-    # Resolve paths
+    # Family suffix keeps runs from clobbering each other
+    suffix = finetune_config.results_suffix
     data_dir = PROJECT_ROOT / eval_config.eval_results_dir
+    comparison_stem = Path(eval_config.comparison_results_filename)
     comparison_path = Path(results_path) if results_path else (
-        data_dir / eval_config.comparison_results_filename
+        data_dir / f"{comparison_stem.stem}{suffix}{comparison_stem.suffix}"
     )
+    stem = Path(eval_config.eval_results_filename)
     if output_path:
         output_path = Path(output_path)
     elif score_base:
-        stem = Path(eval_config.eval_results_filename)
-        output_path = data_dir / f"{stem.stem}_base{stem.suffix}"
+        output_path = data_dir / f"{stem.stem}{suffix}_base{stem.suffix}"
     else:
-        output_path = data_dir / eval_config.eval_results_filename
+        output_path = data_dir / f"{stem.stem}{suffix}{stem.suffix}"
 
     # Optionally generate fresh comparison results
     if run_test_first:

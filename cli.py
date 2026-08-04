@@ -151,6 +151,15 @@ examples:
         metavar="<command>",
     )
 
+    # Shared -M flag for every pipeline command
+    family_parent = argparse.ArgumentParser(add_help=False)
+    family_parent.add_argument(
+        "--model-family", "-M",
+        choices=["llama", "mistral"],
+        default="llama",
+        help="Base model family to fine-tune/export/evaluate (default: llama)",
+    )
+
     # ── parse ──────────────────────────────────────────────────
     p_parse = subparsers.add_parser(
         "parse",
@@ -176,6 +185,7 @@ examples:
         "prepare",
         help="Split JSONL into train/valid/test sets (80/10/10)",
         description="Split your training JSONL into the three files MLX expects.",
+        parents=[family_parent],
     )
     p_prepare.set_defaults(func=cmd_prepare)
 
@@ -184,6 +194,7 @@ examples:
         "train",
         help="Run MLX LoRA fine-tuning (~10 min on Apple Silicon)",
         description="Fine-tune the base model using your training data with MLX LoRA.",
+        parents=[family_parent],
     )
     p_train.set_defaults(func=cmd_train)
 
@@ -192,6 +203,7 @@ examples:
         "test",
         help="A/B compare base model vs fine-tuned",
         description="Generate side-by-side responses from base and fine-tuned models.",
+        parents=[family_parent],
     )
     p_test.set_defaults(func=cmd_test)
 
@@ -200,6 +212,7 @@ examples:
         "evaluate",
         help="Score fine-tuned responses with Claude (LLM-as-a-Judge)",
         description="Send model responses to Claude's API for structured scoring against the writing style profile.",
+        parents=[family_parent],
     )
     p_evaluate.add_argument(
         "--results", "-r",
@@ -220,6 +233,7 @@ examples:
         "export",
         help="Export fine-tuned model to Ollama",
         description="Create an Ollama model from your fine-tuned adapter.",
+        parents=[family_parent],
     )
     p_export.add_argument(
         "--adapter",
@@ -240,6 +254,7 @@ examples:
         "pipeline",
         help="Full pipeline: parse → prepare → train → test → export",
         description="Run the entire pipeline from raw data to Ollama model.",
+        parents=[family_parent],
     )
     p_pipeline.set_defaults(func=cmd_pipeline)
 
@@ -277,6 +292,12 @@ examples:
     if not args.command:
         parser.print_help()
         sys.exit(0)
+
+    # Swap presets before any pipeline code reads the config
+    family = getattr(args, "model_family", None)
+    if family:
+        from configs.config import use_model_family
+        use_model_family(family)
 
     success = args.func(args)
     sys.exit(0 if success else 1)

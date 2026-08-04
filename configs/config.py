@@ -54,6 +54,42 @@ class RetrievalConfig(BaseSettings):
     collection_name: str = "personal_knowledge"
 
 
+# ──────────────────────────────────────────────────────────────
+# Model family presets
+# ──────────────────────────────────────────────────────────────
+# Everything model-specific in one place — pick with `-M` on the CLI.
+
+MODEL_PRESETS: dict[str, dict] = {
+    "llama": {
+        "base_model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        "ollama_model_name": "llama3.1-assistant:latest",
+        "ollama_base_model": "llama3.1:8b-instruct-q8_0",
+        "hf_base_model": "meta-llama/Llama-3.1-8B-Instruct",
+        "adapter_path": "adapters/writing-style",
+        "fused_model_path": "models/fused/writing-style",
+        "supports_system_role": True,
+        "needs_gguf_export": False,
+        "results_suffix": "",
+        "iters": 300,
+    },
+    "mistral": {
+        "base_model": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+        "ollama_model_name": "mistral-assistant:latest",
+        "ollama_base_model": "mistral:7b-instruct-v0.3-q8_0",
+        "hf_base_model": "mistralai/Mistral-7B-Instruct-v0.3",
+        "adapter_path": "adapters/writing-style-mistral",
+        "fused_model_path": "models/fused/writing-style-mistral",
+        # No system role in Mistral's template — we fold it into the user turn
+        "supports_system_role": False,
+        # Ollama chokes on Mistral safetensors, so export goes through GGUF
+        "needs_gguf_export": True,
+        "results_suffix": "_mistral",
+        # Overfits faster than Llama — val loss bottomed at ~150 in the 300 run
+        "iters": 150,
+    },
+}
+
+
 class FineTuneConfig(BaseSettings):
     """
     LoRA fine-tuning config for MLX on Apple Silicon.
@@ -63,6 +99,9 @@ class FineTuneConfig(BaseSettings):
     """
 
     # ── Model ──────────────────────────────────────────────────
+    # Defaults match the "llama" preset; use_model_family() swaps them
+    model_family: str = "llama"
+
     # Pre-quantized 4-bit MLX model (~4.5GB download on first run)
     base_model: str = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
 
@@ -71,6 +110,18 @@ class FineTuneConfig(BaseSettings):
 
     # Modelfile base for direct adapter import
     ollama_base_model: str = "llama3.1:8b-instruct-q8_0"
+
+    # Unquantized HF name — PEFT adapter_config wants it
+    hf_base_model: str = "meta-llama/Llama-3.1-8B-Instruct"
+
+    # Can the chat template take a system message?
+    supports_system_role: bool = True
+
+    # Does Ollama import need the GGUF detour?
+    needs_gguf_export: bool = False
+
+    # Keeps result files from clobbering each other across families
+    results_suffix: str = ""
 
     # ── LoRA Hyperparameters ───────────────────────────────────
     # Rank 8 on 8 of 32 layers = light touch. Learns style without
@@ -178,3 +229,14 @@ chunking_config = ChunkingConfig()
 retrieval_config = RetrievalConfig()
 prompt_config = PromptConfig()
 finetune_config = FineTuneConfig()
+
+
+def use_model_family(family: str) -> None:
+    """Swap finetune_config to another preset. Call before any pipeline step runs."""
+    if family not in MODEL_PRESETS:
+        raise ValueError(
+            f"Unknown model family '{family}'. Options: {', '.join(MODEL_PRESETS)}"
+        )
+    finetune_config.model_family = family
+    for key, value in MODEL_PRESETS[family].items():
+        setattr(finetune_config, key, value)

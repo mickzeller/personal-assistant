@@ -17,6 +17,24 @@ from configs.config import PROJECT_ROOT, finetune_config
 console = Console()
 
 
+def _fold_system_into_user(example: dict) -> dict:
+    """
+    Merge a leading system message into the first user turn.
+
+    Mistral's template has no system role and straight-up rejects one,
+    so the training data has to bake it in.
+    """
+    messages = example.get("messages", [])
+    if len(messages) < 2 or messages[0].get("role") != "system":
+        return example
+
+    system_content = messages[0]["content"]
+    rest = [dict(m) for m in messages[1:]]
+    if rest[0].get("role") == "user":
+        rest[0]["content"] = f"{system_content}\n\n{rest[0]['content']}"
+    return {**example, "messages": rest}
+
+
 def split_data(
     input_path: Path = None,
     output_dir: Path = None,
@@ -49,6 +67,13 @@ def split_data(
 
     with open(input_path, "r", encoding="utf-8") as f:
         examples = [json.loads(line) for line in f if line.strip()]
+
+    if not finetune_config.supports_system_role:
+        examples = [_fold_system_into_user(e) for e in examples]
+        console.print(
+            f"[dim]{finetune_config.model_family}: no system role — "
+            "folded system prompts into user turns[/dim]"
+        )
 
     total = len(examples)
     if total == 0:
