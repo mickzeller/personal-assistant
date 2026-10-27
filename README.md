@@ -252,6 +252,6 @@ One Apple Silicon Mac, and unified memory is the secret weapon: 64GB runs ~70B m
 
 - [x] Run first scored evaluation (v3 baseline: 2.8/5.0 — see scores above)
 - [x] Fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B (Llama wins, 2.7 vs 1.9 — see head-to-head above)
-- [ ] Add automated style metrics (response length, exclamation density, contraction ratio)
+- [x] Add automated style metrics (length, exclamation density, contraction ratio, emoji/em-dash counts, truncation check — computed free alongside `evaluate`, shown in their own table)
 - [ ] Build Gradio web UI (Phase 4)
 - [ ] Try DPO training with preference pairs (Phase 5)

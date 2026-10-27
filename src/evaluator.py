@@ -24,6 +24,7 @@ from configs.eval_config import (
     load_writing_style_profile,
     RUBRIC_DIMENSIONS,
 )
+from src.style_metrics import aggregate_style_metrics, compute_style_metrics
 
 console = Console()
 
@@ -182,6 +183,8 @@ def evaluate_comparison(results: list[dict], response_key: str = "finetuned_resp
                 "scores": eval_result["scores"],
                 "reasoning": eval_result["reasoning"],
                 "overall_avg": eval_result["overall_avg"],
+                # Computed on the full response, before storage truncation
+                "style_metrics": compute_style_metrics(response),
             })
 
             avg = eval_result["overall_avg"]
@@ -218,6 +221,9 @@ def evaluate_comparison(results: list[dict], response_key: str = "finetuned_resp
         "strongest": strongest,
         "weakest": weakest,
         "responses_evaluated": len(evaluations),
+        "style_metrics": aggregate_style_metrics(
+            [e["style_metrics"] for e in evaluations]
+        ),
     }
 
     return {
@@ -298,6 +304,66 @@ def _display_results(report: dict) -> None:
     console.print(f"\n  Strongest dimension: [green]{RUBRIC_DIMENSIONS[summary['strongest']]['name']}[/green]")
     console.print(f"  Weakest dimension:  [yellow]{RUBRIC_DIMENSIONS[summary['weakest']]['name']}[/yellow]")
     console.print(f"  Responses evaluated: {summary['responses_evaluated']}")
+
+    _display_style_metrics(report)
+
+
+def _display_style_metrics(report: dict) -> None:
+    """Display automated style metrics as a second Rich table."""
+    results = report.get("results", [])
+    if not any("style_metrics" in r for r in results):
+        return
+
+    table = Table(
+        title="Automated Style Metrics",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Test", style="white", max_width=25)
+    table.add_column("Words", justify="center")
+    table.add_column("Excl/100w", justify="center")
+    table.add_column("Contr/100w", justify="center")
+    table.add_column("Contr Ratio", justify="center")
+    table.add_column("Emoji", justify="center")
+    table.add_column("Em-dash", justify="center")
+    table.add_column("Ends OK", justify="center")
+
+    for r in results:
+        m = r.get("style_metrics")
+        if not m:
+            continue
+        ratio = m["contraction_ratio"]
+        table.add_row(
+            r["context"][:25],
+            str(m["word_count"]),
+            str(m["exclamations_per_100_words"]),
+            str(m["contractions_per_100_words"]),
+            "—" if ratio is None else str(ratio),
+            str(m["emoji_count"]),
+            str(m["em_dash_count"]) if m["em_dash_count"] == 0
+            else f"[yellow]{m['em_dash_count']}[/yellow]",
+            "[green]✓[/green]" if m["ends_cleanly"] else "[red]✗ cut off[/red]",
+        )
+
+    agg = report["summary"].get("style_metrics", {})
+    if agg:
+        avg_ratio = agg.get("avg_contraction_ratio")
+        truncated = agg.get("truncated_responses", 0)
+        table.add_section()
+        table.add_row(
+            "[bold]AVERAGE[/bold]",
+            f"[bold]{agg.get('avg_word_count', '—')}[/bold]",
+            f"[bold]{agg.get('avg_exclamations_per_100_words', '—')}[/bold]",
+            f"[bold]{agg.get('avg_contractions_per_100_words', '—')}[/bold]",
+            f"[bold]{'—' if avg_ratio is None else avg_ratio}[/bold]",
+            f"[bold]{agg.get('avg_emoji_count', '—')}[/bold]",
+            f"[bold]{agg.get('total_em_dashes', 0)}[/bold]",
+            f"[bold red]{truncated} cut off[/bold red]" if truncated
+            else "[bold green]all ✓[/bold green]",
+        )
+
+    console.print()
+    console.print(table)
 
 
 def _score_cell(score, bold: bool = False) -> str:

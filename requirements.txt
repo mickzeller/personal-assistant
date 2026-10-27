@@ -25,6 +25,9 @@ gradio>=5.0.0
 # Evaluation (Claude API for LLM-as-a-Judge scoring)
 anthropic>=0.40.0
 
+# Testing
+pytest>=8.0.0
+
 # Utilities
 rich>=13.0.0           # Pretty terminal output
 python-dotenv>=1.0.0   # Environment config

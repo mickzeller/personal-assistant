@@ -44,6 +44,9 @@ secrets.*
 .DS_Store
 Thumbs.db
 
+# PhotoRec recovery output (root-owned, never belongs in the repo)
+recup_dir*/
+
 # Logs
 *.log
 
