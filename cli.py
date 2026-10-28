@@ -100,6 +100,18 @@ def cmd_chat(args):
     return True
 
 
+def cmd_ui(args):
+    """Launch the Gradio web UI."""
+    from src.web_ui import launch_ui
+    launch_ui(
+        model=args.model,
+        rag_enabled=not args.no_rag,
+        port=args.port,
+        share=args.share,
+    )
+    return True
+
+
 def cmd_evaluate(args):
     """Score fine-tuned responses using Claude as a judge."""
     from src.evaluator import run_evaluation
@@ -141,6 +153,7 @@ examples:
   python cli.py pipeline              Run everything start to finish
   python cli.py chat                  Chat with your assistant
   python cli.py chat --model gemma3   Chat with a specific model
+  python cli.py ui                    Chat in the browser (Gradio)
   python cli.py ingest                Ingest docs into RAG knowledge base
 """,
     )
@@ -273,6 +286,30 @@ examples:
         help="Disable RAG retrieval",
     )
     p_chat.set_defaults(func=cmd_chat)
+
+    # ── ui ─────────────────────────────────────────────────────
+    p_ui = subparsers.add_parser(
+        "ui",
+        help="Launch the Gradio web UI",
+        description="Chat with your assistant in the browser — streaming, RAG toggle, same logging as the CLI.",
+    )
+    p_ui.add_argument(
+        "--model", "-m",
+        help="Ollama model to use (default: from config)",
+    )
+    p_ui.add_argument(
+        "--no-rag", action="store_true",
+        help="Disable RAG retrieval",
+    )
+    p_ui.add_argument(
+        "--port", "-p", type=int, default=7860,
+        help="Port to serve on (default: 7860)",
+    )
+    p_ui.add_argument(
+        "--share", action="store_true",
+        help="Create a public gradio.live URL (off by default — exposes your chat to the internet)",
+    )
+    p_ui.set_defaults(func=cmd_ui)
 
     # ── ingest ─────────────────────────────────────────────────
     p_ingest = subparsers.add_parser(

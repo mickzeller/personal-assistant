@@ -124,8 +124,42 @@ class ChatAssistant:
         messages = self._build_messages(query, context_chunks)
         response = self._stream_response(messages)
 
-        # Store the ORIGINAL query, not the context-injected version,
-        # so history stays clean
+        self._record_exchange(query, response, context_chunks)
+
+        return response
+
+    def ask_stream(self, query: str, force_rag: bool = None):
+        """
+        Generator version of ask() for the web UI — yields the accumulated
+        response as tokens arrive, no console output.
+        """
+        use_rag = force_rag if force_rag is not None else self.rag_enabled
+        context_chunks = None
+
+        if use_rag and self.retriever:
+            context_chunks = self.retriever.search(query)
+
+        messages = self._build_messages(query, context_chunks)
+
+        full_response = ""
+        try:
+            stream = self._client.chat(
+                model=self.model,
+                messages=messages,
+                stream=True,
+            )
+            for chunk in stream:
+                full_response += chunk["message"]["content"]
+                yield full_response
+        except Exception as e:
+            yield full_response or f"⚠️ Error from Ollama: {e}"
+            return
+
+        self._record_exchange(query, full_response, context_chunks)
+
+    def _record_exchange(self, query, response, context_chunks):
+        """Append to history (original query, not the context-injected
+        version), log for future fine-tuning, and cap history at 10 turns."""
         self.conversation_history.append({"role": "user", "content": query})
         self.conversation_history.append({"role": "assistant", "content": response})
 
@@ -137,12 +171,9 @@ class ChatAssistant:
             sources=list(set(sources)),
         )
 
-        # Cap history at the last 10 turns
         max_history = 20
         if len(self.conversation_history) > max_history:
             self.conversation_history = self.conversation_history[-max_history:]
-
-        return response
 
     def clear_history(self):
         """Clear conversation history (start fresh)."""
