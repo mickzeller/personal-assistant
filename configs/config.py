@@ -194,6 +194,12 @@ class FineTuneConfig(BaseSettings):
     ]
 
 
+# Personal style prompt — gitignored; the generic default below is the fallback.
+# The fine-tune was TRAINED with this as the system message, so chatting
+# without it makes the model fall back to generic assistant-speak.
+_LOCAL_SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.local.txt"
+
+
 class PromptConfig(BaseSettings):
     """System prompt and context templates — the assistant's personality."""
     system_prompt: str = (
@@ -229,6 +235,11 @@ chunking_config = ChunkingConfig()
 retrieval_config = RetrievalConfig()
 prompt_config = PromptConfig()
 finetune_config = FineTuneConfig()
+
+if _LOCAL_SYSTEM_PROMPT_PATH.exists():
+    prompt_config.system_prompt = _LOCAL_SYSTEM_PROMPT_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
 
 
 def use_model_family(family: str) -> None:

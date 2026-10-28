@@ -43,6 +43,7 @@ python cli.py pipeline             # Full pipeline: parse → prepare → train 
 python cli.py pipeline -M mistral  # Same pipeline, different base model (see Model Families)
 python cli.py evaluate --fresh     # Generate test responses + score them with Claude
 python cli.py chat                 # Chat with your fine-tuned model
+python cli.py ui                   # Same chat in the browser (Gradio)
 ```
 
 ## Model Families
@@ -77,7 +78,7 @@ Deep dives on how each part of the system works and why it's built that way. The
 | Embeddings  | nomic-embed-text (via Ollama) | One interface for everything                                         |
 | Reranking   | ms-marco-MiniLM-L-6-v2        | Cross-encoder catches relevance that embedding distance misses       |
 | Evaluation  | Claude API (Sonnet)           | LLM-as-Judge for structured writing style scoring                    |
-| UI          | Rich (CLI)                    | Pretty terminal output, tables, panels                               |
+| UI          | Rich (CLI) + Gradio (web)     | Pretty terminal output, plus browser chat with streaming + RAG toggle |
 
 ## Project Structure
 
@@ -90,7 +91,9 @@ personal-assistant/
 ├── docs/                           # Deep-dive guides (RAG, fine-tuning, export, training data)
 ├── src/
 │   ├── chat.py                     # Interactive chat with RAG + Ollama
+│   ├── web_ui.py                   # Gradio browser chat (streaming, RAG toggle)
 │   ├── evaluator.py                # LLM-as-Judge scoring pipeline
+│   ├── style_metrics.py            # Deterministic style metrics (free, no API)
 │   ├── finetune.py                 # MLX LoRA training orchestrator
 │   ├── model_tester.py             # A/B comparison (base vs fine-tuned)
 │   ├── ollama_exporter.py          # Fuse → dequantize → Ollama create
@@ -100,6 +103,7 @@ personal-assistant/
 │   ├── retriever.py                # Two-stage RAG retrieval
 │   ├── embeddings.py               # Ollama embedding wrapper
 │   └── conversation_logger.py      # Auto-logs chat sessions for future training
+├── tests/                          # pytest suite (style metrics)
 ├── knowledge_base/                 # Personal docs (gitignored except samples)
 ├── data/                           # Training data, ChromaDB, logs (gitignored)
 ├── adapters/                       # LoRA adapter weights (gitignored)
@@ -154,7 +158,7 @@ For style-matching fine-tunes, lower is almost always better: you want the model
 
 This one cost hours. MLX saves LoRA adapters with different tensor keys (`lora_a` vs `lora_A.weight`), transposed shapes, a different config schema, and a different filename pattern. You cannot just point Ollama at an MLX adapter directory.
 
-**The reliable path (Path B):** fuse the adapter into the base model (`python -m mlx_lm fuse --dequantize` — MLX's 4-bit format uses a `U32` type Ollama can't read), then `ollama create --quantize q8_0`. Watch the syntax: it's `python -m mlx_lm fuse`, not `mlx_lm.fuse`, and the flag is `--dequantize`, not `--de-quantize`.
+**The reliable path (Path B):** fuse the adapter into the base model (`python -m mlx_lm fuse --dequantize` — MLX's 4-bit format uses a `U32` type Ollama can't read), then `ollama create --quantize q8_0`. Watch the syntax: it's `python -m mlx_lm fuse`, not `mlx_lm.fuse`, and the flag is `--dequantize`, not `--de-quantize`. (Newer Ollama also renamed its quantization types — `q8_0` is now `int8` — so the exporter maps legacy names automatically.)
 
 The exporter also has a faster Path A (adapter converted to PEFT format, ~21MB instead of ~8GB) with the fuse route as fallback. Both are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
 
@@ -199,6 +203,14 @@ Val loss tells you when the model stops generalizing from your data — it says 
 The writing style profile (tone descriptions, example messages, vocabulary patterns) is personal data. Not secrets, but not something you want in a public repo either. Our first pass hardcoded it into `configs/eval_config.py`. The refactored version loads it from `~/.claude/CLAUDE.md` at runtime, which keeps a single source of truth and avoids committing personal writing samples.
 
 Same principle applies to training data (`data/` is gitignored), conversation logs, and adapter weights. The code is committable; the data is not.
+
+### 11. The Fine-Tune Only Sounds Like You With the System Prompt It Trained On
+
+Months after training, the model suddenly sounded like a corporate chatbot again: "I am a helpful, honest, and knowledgeable personal AI assistant." The fine-tune hadn't degraded — the chat path was overriding the system prompt.
+
+Every training example was built with the personal style prompt as its system message, so the model learned "when I see *that* prompt, write like Mick." Hand it a generic assistant prompt instead and it obediently reverts to assistant-speak (the `_nosys` eval runs had already measured this effect — we just forgot to honor it in the chat path). The style prompt isn't decoration; it's the trigger the adapter was conditioned on.
+
+**The fix:** `configs/config.py` now loads the gitignored `configs/system_prompt.local.txt` over the generic default, so chat, web UI, and training all key off the same prompt. Two bonus findings from iterating on that file with an 8B model: few-shot examples of real writing beat style *rules* by a wide margin, but small models will happily steal the examples' content (names, projects) for unrelated requests — an explicit "these show style only, never reuse their details" line is required equipment.
 
 ---
 
@@ -253,5 +265,8 @@ One Apple Silicon Mac, and unified memory is the secret weapon: 64GB runs ~70B m
 - [x] Run first scored evaluation (v3 baseline: 2.8/5.0 — see scores above)
 - [x] Fine-tune Mistral 7B v0.3 for comparison against Llama 3.1 8B (Llama wins, 2.7 vs 1.9 — see head-to-head above)
 - [x] Add automated style metrics (length, exclamation density, contraction ratio, emoji/em-dash counts, truncation check — computed free alongside `evaluate`, shown in their own table)
-- [ ] Build Gradio web UI (Phase 4)
+- [x] Build Gradio web UI (Phase 4) — `python cli.py ui`: browser chat with streaming, RAG toggle, same conversation logging as the CLI
+- [x] Load the personal style prompt from `configs/system_prompt.local.txt` in the chat path (see lesson 11)
+- [ ] Compute style-metric baselines from the training data ("you vs model" targets in the eval table)
+- [ ] Collect preference pairs via 👍/👎 in the web UI (feeds Phase 5)
 - [ ] Try DPO training with preference pairs (Phase 5)
