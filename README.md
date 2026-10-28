@@ -3,7 +3,7 @@
 # LLM Discovery: Building a Personal AI Assistant
 
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple)
-![Model](https://img.shields.io/badge/model-Llama%203.1%208B-blue?logo=meta)
+![Models](https://img.shields.io/badge/models-Llama%203.1%208B%20%2B%20Mistral%207B-blue?logo=meta)
 ![Fine-tuning](https://img.shields.io/badge/fine--tuning-MLX%20LoRA-orange)
 ![Vector DB](https://img.shields.io/badge/vector%20DB-ChromaDB-8A2BE2)
 ![Python](https://img.shields.io/badge/python-3.11+-yellow?logo=python&logoColor=white)
