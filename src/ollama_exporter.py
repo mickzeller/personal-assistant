@@ -260,6 +260,11 @@ def _ollama_create(model_name: str, modelfile_path: Path, quantize: str = None) 
         quantize:       Optional quantization level (e.g. "q8_0"). Required for
                         fused fp16 models to avoid 16GB bloat.
     """
+    # Newer Ollama renamed quantization types (q8_0 → int8, q4_* → int4)
+    legacy_quant_names = {"q8_0": "int8", "q4_0": "int4", "q4_K_M": "int4"}
+    if quantize in legacy_quant_names:
+        quantize = legacy_quant_names[quantize]
+
     quant_msg = f" with {quantize} quantization" if quantize else ""
     console.print(f"\n[bold]Creating Ollama model '{model_name}'{quant_msg}...[/bold]")
     console.print("[dim]This may take a minute...[/dim]\n")
