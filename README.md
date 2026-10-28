@@ -160,7 +160,7 @@ This one cost hours. MLX saves LoRA adapters with different tensor keys (`lora_a
 
 **The reliable path (Path B):** fuse the adapter into the base model (`python -m mlx_lm fuse --dequantize` — MLX's 4-bit format uses a `U32` type Ollama can't read), then `ollama create --quantize q8_0`. Watch the syntax: it's `python -m mlx_lm fuse`, not `mlx_lm.fuse`, and the flag is `--dequantize`, not `--de-quantize`. (Newer Ollama also renamed its quantization types — `q8_0` is now `int8` — so the exporter maps legacy names automatically.)
 
-The exporter also has a faster Path A (adapter converted to PEFT format, ~21MB instead of ~8GB) with the fuse route as fallback. Both are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
+There used to be a faster Path A (adapter converted to PEFT format, ~21MB instead of ~8GB), but current Ollama removed LoRA adapter imports entirely ("LoRA adapters are no longer supported"), so the exporter now goes straight to the fuse route. The PEFT converter sticks around for other runtimes (HF transformers, vLLM). Both paths are covered in [docs/OLLAMA_EXPORT.md](docs/OLLAMA_EXPORT.md).
 
 ### 5. Missing Chat Templates Break Everything Silently
 

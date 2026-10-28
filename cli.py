@@ -258,7 +258,7 @@ examples:
     )
     p_export.add_argument(
         "--path-b", action="store_true",
-        help="Skip adapter import, go straight to fused model export",
+        help="No-op: fused export is now the only Ollama path (kept for compatibility)",
     )
     p_export.set_defaults(func=cmd_export)
 

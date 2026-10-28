@@ -1,35 +1,15 @@
 """
-Ollama Exporter — turns LoRA adapter into a chat-ready Ollama model.
+Ollama Exporter — turns a LoRA adapter into a chat-ready Ollama model.
 
-THE TWO PATHS:
-──────────────
-Getting an MLX-trained LoRA adapter into Ollama isn't plug-and-play.
-MLX and Ollama use different tensor formats, naming conventions, and
-config schemas. Two ways to bridge this gap:
+The route: fuse the adapter into the base model, de-quantize to fp16,
+then `ollama create` (via GGUF for families flagged needs_gguf_export).
+Intermediates (~29GB) are cleaned up after a successful import.
 
-PATH A (Preferred - Convert Adapter to PEFT Format):
-  Ollama can import LoRA adapters in Hugging Face's PEFT format.
-  MLX uses a different format, so we need to convert:
-    1. Rename tensor keys (lora_a -> lora_A.weight, add base_model prefix)
-    2. Transpose tensor shapes (MLX stores [rank, dim], PEFT wants [dim, rank])
-    3. Rewrite adapter_config.json from MLX schema to PEFT schema
-    4. Save as model.safetensors (Ollama looks for model*.safetensors)
+Ollama removed direct LoRA adapter imports, so fusing is the only path
+now. The MLX→PEFT converter (export_path_a) is kept for using adapters
+with other runtimes like HF transformers or vLLM.
 
-  This keeps the adapter separate (~21MB) and is the fastest path.
-
-PATH B (Fallback — Fuse + Import):
-  If PEFT import fails, we fuse the adapter INTO the base model
-  weights, then import the full model:
-    1. Load base model + adapter, merge weights (mlx_lm)
-    2. De-quantize from 4-bit back to fp16
-    3. Create Ollama model from safetensors — or via GGUF for families
-       Ollama can't import directly (needs_gguf_export)
-
-  Slower than Path A but the most reliable. Cleans up its ~29GB of
-  fp16 intermediates after a successful import.
-
-IMPORTANT: Both paths require the Ollama base model to be pulled first.
-Make sure `ollama pull llama3.1:8b-instruct-q8_0` has been run.
+Requires the Ollama base model: `ollama pull llama3.1:8b-instruct-q8_0`.
 """
 
 import json
@@ -652,30 +632,23 @@ def export_to_ollama(
     model_name: str = None,
 ) -> bool:
     """
-    Export fine-tuned model to Ollama, trying Path A first, then Path B.
+    Export fine-tuned model to Ollama via the fused-model route.
 
-    Path A (PEFT adapter import) is preferred because it keeps the adapter
-    separate and small (~21MB). If it fails, Path B (fused model) is the
-    reliable fallback that produces a full standalone model.
-
-    Returns True if the model was successfully created in Ollama.
+    Ollama removed LoRA adapter imports, so fusing is the only path;
+    export_path_a remains for converting adapters to PEFT for other
+    runtimes. Returns True if the model was created.
     """
     console.print(Panel(
         "[bold]Exporting Fine-Tuned Model to Ollama[/bold]\n\n"
-        "We'll try PEFT adapter import first (fast, small).\n"
-        "If that fails, we'll fuse into a full model (slower, reliable).",
+        "Fusing the adapter into a full model, then importing.\n"
+        "(Ollama dropped direct LoRA adapter imports.)",
         border_style="green",
     ))
 
-    # Path A first
-    success = export_path_a(adapter_path=adapter_path, model_name=model_name)
+    success = export_path_b(adapter_path=adapter_path, model_name=model_name)
 
     if not success:
-        console.print("\n[yellow]Path A didn't work. Trying Path B (fused model)...[/yellow]\n")
-        success = export_path_b(adapter_path=adapter_path, model_name=model_name)
-
-    if not success:
-        console.print("\n[red]Both export paths failed.[/red]")
+        console.print("\n[red]Export failed.[/red]")
         console.print("[dim]You can still test the adapter directly with MLX:[/dim]")
         console.print("  [cyan]python -m src.finetune --test[/cyan]")
 
@@ -700,7 +673,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--path-b-only", action="store_true",
-        help="Skip Path A and go straight to fused model export",
+        help="No-op: fused export is now the only Ollama path (kept for compatibility)",
     )
     args = parser.parse_args()
 
