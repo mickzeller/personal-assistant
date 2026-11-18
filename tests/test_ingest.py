@@ -13,6 +13,7 @@ import chromadb
 import pytest
 
 from src.ingest import (
+    display_source,
     generate_chunk_id,
     ingest_file,
     prune_orphaned_sources,
@@ -359,3 +360,21 @@ def test_prune_skips_unreadable_directory(kb, collection):
 
     assert pruned == []
     assert collection.count() == before
+
+
+# ──────────────────────────────────────────────────────────────
+# Display names
+# ──────────────────────────────────────────────────────────────
+
+def test_display_source_keeps_kb_relative_names():
+    assert display_source("notes/a.md") == "notes/a.md"
+
+
+def test_display_source_shortens_home_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert display_source(str(tmp_path / "Downloads" / "a.md")) == "~/Downloads/a.md"
+
+
+def test_display_source_leaves_other_absolute_paths_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert display_source("/opt/shared/a.md") == "/opt/shared/a.md"

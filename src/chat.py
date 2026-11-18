@@ -111,7 +111,7 @@ class ChatAssistant:
             context_chunks = self.retriever.search(query)
 
             if context_chunks:
-                sources = set(c.source for c in context_chunks)
+                sources = sorted(set(c.display_name for c in context_chunks))
                 top_score = max(c.rerank_score for c in context_chunks if c.rerank_score)
                 console.print(
                     f"[dim]📚 Found {len(context_chunks)} relevant chunks "
@@ -262,14 +262,14 @@ class ChatAssistant:
                 console.print(f"RAG is currently [cyan]{status}[/cyan]. Use /rag on or /rag off")
 
         elif cmd == "/sources":
-            from src.ingest import get_collection_stats
+            from src.ingest import display_source, get_collection_stats
             stats = get_collection_stats()
             console.print(f"\n[bold]Knowledge Base Stats:[/bold]")
             console.print(f"  Total chunks: {stats['total_chunks']}")
             if stats['sources']:
                 console.print(f"  Sources:")
                 for src in stats['sources']:
-                    console.print(f"    • {src}")
+                    console.print(f"    • {display_source(src)}")
 
         elif cmd == "/model":
             if arg:

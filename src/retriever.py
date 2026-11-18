@@ -14,7 +14,7 @@ from sentence_transformers import CrossEncoder
 
 from configs.config import retrieval_config
 from src.embeddings import OllamaEmbedder
-from src.ingest import get_chroma_collection
+from src.ingest import display_source, get_chroma_collection
 
 console = Console()
 
@@ -27,6 +27,11 @@ class RetrievedChunk:
     chunk_index: int
     distance: float                    # cosine distance (lower = more similar)
     rerank_score: float | None = None  # cross-encoder score (higher = better), None if not reranked
+
+    @property
+    def display_name(self) -> str:
+        """Source name for humans: KB-relative as-is, outside files as ~/..."""
+        return display_source(self.source)
 
 
 class Retriever:
@@ -139,7 +144,7 @@ class Retriever:
                 score_str = f" (relevance: {chk.rerank_score:.2f})"
 
             context_parts.append(
-                f"[Source: {chk.source} | Chunk {chk.chunk_index}]{score_str}\n"
+                f"[Source: {chk.display_name} | Chunk {chk.chunk_index}]{score_str}\n"
                 f"{chk.text}"
             )
 
@@ -165,7 +170,7 @@ if __name__ == "__main__":
     else:
         for i, chunk in enumerate(results, 1):
             score = f"{chunk.rerank_score:.3f}" if chunk.rerank_score else "N/A"
-            console.print(f"[bold cyan]Result {i}[/bold cyan] — {chunk.source} "
+            console.print(f"[bold cyan]Result {i}[/bold cyan] — {chunk.display_name} "
                           f"(score: {score}, distance: {chunk.distance:.3f})")
             console.print(f"  {chunk.text[:200]}...")
             console.print()

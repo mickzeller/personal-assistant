@@ -405,6 +405,22 @@ def source_name_for(file_path: Path) -> str:
         return str(path)
 
 
+def display_source(source: str) -> str:
+    """
+    Human-friendly version of a stored source name for citations and logs.
+    Relative knowledge_base/ names pass through untouched; absolute paths
+    under the home directory are shortened to ~/..., anything else as-is.
+    The stored metadata keeps the full value, this is display only.
+    """
+    path = Path(source)
+    if not path.is_absolute():
+        return source
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return source
+
+
 def _abs(path: Path) -> Path:
     """Absolute, normalized path without following symlinks."""
     return Path(os.path.abspath(path))
