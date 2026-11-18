@@ -43,7 +43,16 @@ python -m src.ingest
 
 # Ingest a specific directory
 python -m src.ingest /path/to/some/folder
+
+# Via the CLI (same thing, plus flags)
+python cli.py ingest
+python cli.py ingest --dir knowledge_base/notes
+python cli.py ingest --no-prune   # keep chunks for files deleted/renamed on disk
 ```
+
+Re-ingesting is a replace: a file's old chunks are swapped for the new ones,
+and chunks for files that no longer exist under the ingested directory get
+pruned. Point `--dir` at a subfolder to limit both ingest and pruning to it.
 
 ### Supported file types
 `.md` `.txt` `.pdf` `.json` `.jsonl` `.docx`

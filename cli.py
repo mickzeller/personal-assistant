@@ -132,7 +132,7 @@ def cmd_ingest(args):
     target_dir = Path(args.dir) if args.dir else KNOWLEDGE_BASE_DIR
 
     console.print(f"[bold]Ingesting documents from: {target_dir}[/bold]")
-    results = ingest_directory(target_dir)
+    results = ingest_directory(target_dir, prune=not args.no_prune)
     return bool(results)
 
 
@@ -320,6 +320,11 @@ examples:
     p_ingest.add_argument(
         "--dir", "-d",
         help="Directory to ingest (default: knowledge_base/)",
+    )
+    p_ingest.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="Keep chunks for files that were deleted or renamed on disk",
     )
     p_ingest.set_defaults(func=cmd_ingest)
 

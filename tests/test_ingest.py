@@ -12,7 +12,12 @@ import uuid
 import chromadb
 import pytest
 
-from src.ingest import generate_chunk_id, ingest_file
+from src.ingest import (
+    generate_chunk_id,
+    ingest_file,
+    prune_orphaned_sources,
+    source_name_for,
+)
 
 
 class FakeEmbedder:
@@ -20,6 +25,13 @@ class FakeEmbedder:
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [[float(len(t)), 1.0, 0.0] for t in texts]
+
+
+class ExplodingEmbedder:
+    """Simulates Ollama dying mid-run."""
+
+    def embed_documents(self, texts):
+        raise RuntimeError("ollama went away")
 
 
 @pytest.fixture
@@ -100,3 +112,205 @@ def test_reingest_same_content_is_idempotent(tmp_path, collection):
 
     assert n1 == n2
     assert collection.count() == n1
+
+
+def test_file_that_became_empty_drops_its_chunks(tmp_path, collection):
+    note = tmp_path / "note.md"
+    _write_paragraphs(note, 4)
+    ingest_file(note, collection, FakeEmbedder())
+
+    note.write_text("")
+    n = ingest_file(note, collection, FakeEmbedder())
+
+    assert n == 0
+    assert collection.count() == 0
+
+
+def test_embedding_failure_keeps_previous_chunks(tmp_path, collection):
+    note = tmp_path / "note.md"
+    _write_paragraphs(note, 4)
+    n = ingest_file(note, collection, FakeEmbedder())
+
+    with pytest.raises(RuntimeError):
+        ingest_file(note, collection, ExplodingEmbedder())
+
+    assert collection.count() == n
+
+
+def test_loader_failure_keeps_previous_chunks(tmp_path, collection, monkeypatch):
+    import src.ingest as ingest_module
+
+    note = tmp_path / "note.md"
+    _write_paragraphs(note, 4)
+    n = ingest_file(note, collection, FakeEmbedder())
+
+    def boom(_path):
+        raise ValueError("corrupt file")
+
+    monkeypatch.setitem(ingest_module.LOADERS, ".md", boom)
+    with pytest.raises(ValueError):
+        ingest_file(note, collection, FakeEmbedder())
+
+    assert collection.count() == n
+
+
+# ──────────────────────────────────────────────────────────────
+# Orphan pruning (files deleted or renamed on disk)
+# ──────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def kb(tmp_path, monkeypatch):
+    """Point the knowledge base root at tmp_path so sources get relative names."""
+    import src.ingest as ingest_module
+    monkeypatch.setattr(ingest_module, "KNOWLEDGE_BASE_DIR", tmp_path)
+    return tmp_path
+
+
+def _ingest_all(directory, collection):
+    files = sorted(directory.rglob("*.md"))
+    for f in files:
+        ingest_file(f, collection, FakeEmbedder())
+    return {source_name_for(f) for f in files}
+
+
+def test_prune_removes_deleted_file(kb, collection):
+    keep = kb / "keep.md"
+    gone = kb / "gone.md"
+    _write_paragraphs(keep, 3)
+    _write_paragraphs(gone, 3)
+    _ingest_all(kb, collection)
+    n_keep = len(_chunks_for(collection, "keep.md")["ids"])
+
+    gone.unlink()
+    live = _ingest_all(kb, collection)
+    pruned = prune_orphaned_sources(collection, kb, [".md"], live)
+
+    assert pruned == ["gone.md"]
+    assert collection.count() == n_keep
+    assert _chunks_for(collection, "gone.md")["ids"] == []
+
+
+def test_prune_handles_rename_without_duplicating(kb, collection):
+    old = kb / "old-notes.md"
+    _write_paragraphs(old, 3)
+    _ingest_all(kb, collection)
+
+    old.rename(kb / "notes-2024.md")
+    live = _ingest_all(kb, collection)
+    pruned = prune_orphaned_sources(collection, kb, [".md"], live)
+
+    assert pruned == ["old-notes.md"]
+    n_new = len(_chunks_for(collection, "notes-2024.md")["ids"])
+    assert n_new > 0
+    assert collection.count() == n_new
+
+
+def test_prune_scoped_to_subdirectory(kb, collection):
+    docs = kb / "docs"
+    elsewhere = kb / "elsewhere"
+    docs.mkdir()
+    elsewhere.mkdir()
+    _write_paragraphs(docs / "a.md", 2)
+    _write_paragraphs(elsewhere / "b.md", 2)
+    _ingest_all(kb, collection)
+    n_a = len(_chunks_for(collection, "docs/a.md")["ids"])
+    n_b = len(_chunks_for(collection, "elsewhere/b.md")["ids"])
+
+    # b.md is deleted, but this run only covers docs/, so it is out of scope
+    (elsewhere / "b.md").unlink()
+    live = _ingest_all(docs, collection)
+    pruned = prune_orphaned_sources(collection, docs, [".md"], live)
+
+    assert pruned == []
+    assert collection.count() == n_a + n_b
+
+    # A full knowledge-base run does catch it
+    live = _ingest_all(kb, collection)
+    pruned = prune_orphaned_sources(collection, kb, [".md"], live)
+    assert pruned == ["elsewhere/b.md"]
+    assert collection.count() == n_a
+
+
+def test_prune_ignores_other_file_types(kb, collection):
+    md = kb / "a.md"
+    txt = kb / "b.txt"
+    _write_paragraphs(md, 2)
+    _write_paragraphs(txt, 2)
+    ingest_file(md, collection, FakeEmbedder())
+    ingest_file(txt, collection, FakeEmbedder())
+    before = collection.count()
+
+    txt.unlink()
+    # Run scoped to .md only: the missing .txt is out of scope, so it stays
+    pruned = prune_orphaned_sources(collection, kb, [".md"], {"a.md"})
+
+    assert pruned == []
+    assert collection.count() == before
+
+
+def test_prune_never_touches_outside_directory_runs(kb, tmp_path_factory, collection):
+    """Files outside the knowledge base are stored by bare name and can't be located, so skip them."""
+    external = tmp_path_factory.mktemp("external")
+    _write_paragraphs(external / "ext.md", 2)
+    ingest_file(external / "ext.md", collection, FakeEmbedder())
+    before = collection.count()
+
+    (external / "ext.md").unlink()
+    pruned = prune_orphaned_sources(collection, external, [".md"], set())
+
+    assert pruned == []
+    assert collection.count() == before
+
+
+def test_prune_on_empty_collection_is_noop(kb, collection):
+    assert prune_orphaned_sources(collection, kb, [".md"], set()) == []
+
+
+def test_prune_handles_case_only_rename(kb, collection):
+    """macOS reports Notes.md as existing when only notes.md does; prune must not be fooled."""
+    old = kb / "Notes.md"
+    _write_paragraphs(old, 3)
+    _ingest_all(kb, collection)
+
+    old.rename(kb / "notes.md")
+    live = _ingest_all(kb, collection)
+    pruned = prune_orphaned_sources(collection, kb, [".md"], live)
+
+    assert pruned == ["Notes.md"]
+    n_new = len(_chunks_for(collection, "notes.md")["ids"])
+    assert collection.count() == n_new
+
+
+def test_symlinked_subdirectory_keeps_kb_relative_name_and_survives_prune(kb, tmp_path_factory, collection):
+    """A symlinked folder inside the KB is skipped by rglob; its chunks must not be treated as orphans."""
+    real = tmp_path_factory.mktemp("real_notes")
+    _write_paragraphs(real / "x.md", 2)
+    (kb / "notes").symlink_to(real, target_is_directory=True)
+
+    via_link = kb / "notes" / "x.md"
+    assert source_name_for(via_link) == "notes/x.md"
+    ingest_file(via_link, collection, FakeEmbedder())
+    before = collection.count()
+
+    # Default run: rglob doesn't descend into the symlink, so live_sources is empty
+    pruned = prune_orphaned_sources(collection, kb, [".md"], set())
+
+    assert pruned == []
+    assert collection.count() == before
+
+
+def test_prune_skips_unreadable_directory(kb, collection):
+    private = kb / "private"
+    private.mkdir()
+    _write_paragraphs(private / "secret.md", 2)
+    ingest_file(private / "secret.md", collection, FakeEmbedder())
+    before = collection.count()
+
+    private.chmod(0o000)
+    try:
+        pruned = prune_orphaned_sources(collection, kb, [".md"], set())
+    finally:
+        private.chmod(0o755)
+
+    assert pruned == []
+    assert collection.count() == before

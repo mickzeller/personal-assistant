@@ -18,6 +18,7 @@ chunk boundary, which would confuse both the embedding model and the LLM.
 """
 
 import hashlib
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -380,6 +381,41 @@ def get_chroma_collection() -> chromadb.Collection:
     return collection
 
 
+def source_name_for(file_path: Path) -> str:
+    """
+    The "source" stored in chunk metadata. Relative to knowledge_base/ when
+    the file lives there, otherwise just the file name. This is the key that
+    ties chunks back to a file for replace-on-reingest and orphan pruning.
+
+    Uses abspath rather than resolve() on purpose: a symlinked folder inside
+    knowledge_base/ should keep its knowledge_base-relative name, otherwise
+    its files look like outside files and orphan pruning can't locate them.
+    """
+    try:
+        return str(_abs(file_path).relative_to(_abs(KNOWLEDGE_BASE_DIR)))
+    except ValueError:
+        return file_path.name
+
+
+def _abs(path: Path) -> Path:
+    """Absolute, normalized path without following symlinks."""
+    return Path(os.path.abspath(path))
+
+
+def _exists_exact(path: Path) -> bool:
+    """
+    Like Path.exists(), but case-exact on case-insensitive filesystems
+    (macOS APFS says Notes.md exists when only notes.md does). An unreadable
+    parent counts as "might exist" so we never prune on a permission error.
+    """
+    try:
+        return path.name in os.listdir(path.parent)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def generate_chunk_id(source: str, chunk_index: int) -> str:
     """
     Deterministic ID (hash of source + index) so re-ingesting the same
@@ -415,32 +451,22 @@ def ingest_file(
     loader = LOADERS[suffix]
     text = loader(file_path)
 
-    if not text.strip():
-        console.print(f"  [yellow]Skipping empty file: {file_path.name}[/yellow]")
-        return 0
+    source_name = source_name_for(file_path)
 
     # Step 2: Chunk
-    chunks = chunk_text(text)
+    chunks = chunk_text(text) if text.strip() else []
 
     if not chunks:
+        # The file is now empty, so its previous chunks are stale too.
+        console.print(f"  [yellow]Skipping empty file: {file_path.name}[/yellow]")
+        collection.delete(where={"source": source_name})
         return 0
 
     # Step 3 & 4: Embed and store in batches
     # ChromaDB has a max batch size (~5,461). Large files like a 331-conversation
     # Claude export can produce 7,000+ chunks, so we process in batches.
-    try:
-        source_name = str(file_path.resolve().relative_to(KNOWLEDGE_BASE_DIR.resolve()))
-    except ValueError:
-        # File lives outside the knowledge base dir
-        source_name = file_path.name
     batch_size = 500  # well under ChromaDB's limit, keeps memory reasonable
     total = len(chunks)
-
-    # Replace, don't merge: drop every chunk from a previous ingest of this
-    # file. Chunk IDs are source + index, so upsert alone only overwrites
-    # indices that still exist. If a file shrinks from 10 chunks to 6, the
-    # old chunks 6-9 would otherwise linger with stale text and metadata.
-    collection.delete(where={"source": source_name})
 
     for batch_start in range(0, total, batch_size):
         batch_end = min(batch_start + batch_size, total)
@@ -480,12 +506,79 @@ def ingest_file(
                 f"({batch_end}/{total} chunks)[/dim]"
             )
 
+    # Replace, don't merge: chunk IDs are source + index, so the upserts above
+    # only overwrote indices that still exist. If the file shrank from 10
+    # chunks to 6, old chunks 6-9 would linger with stale text and metadata.
+    # Trimming AFTER the upserts (rather than deleting everything up front)
+    # means a loader or embedding failure leaves the previous chunks in place
+    # instead of leaving the file with nothing in the index.
+    collection.delete(
+        where={"$and": [{"source": source_name}, {"chunk_index": {"$gte": total}}]}
+    )
+
     return total
+
+
+def prune_orphaned_sources(
+    collection: chromadb.Collection,
+    directory: Path,
+    file_types: list[str],
+    live_sources: set[str],
+) -> list[str]:
+    """
+    Delete chunks whose source file no longer exists on disk.
+
+    Deleting or renaming a file in knowledge_base/ never touches ChromaDB on
+    its own, so its chunks would otherwise stick around forever (and a rename
+    leaves the same content indexed twice under two source names).
+
+    Scoping matters: ingest_directory can run on a subdirectory or a subset
+    of file types, and a source that simply wasn't part of this run is not
+    an orphan. A stored source is only a prune candidate when its suffix is
+    in file_types AND knowledge_base/<source> falls under `directory`.
+
+    Known limitation: files ingested from outside knowledge_base/ are stored
+    by bare file name, which is indistinguishable from a top-level file in
+    knowledge_base/. Runs on an outside directory therefore never prune, and
+    a knowledge_base/ run will prune an outside-ingested bare name that has
+    no matching top-level file. Keep ad-hoc ingests inside knowledge_base/
+    (or pass --no-prune) to avoid that.
+
+    Returns the list of source names that were removed.
+    """
+    count = collection.count()
+    if count == 0:
+        return []
+
+    results = collection.get(limit=count, include=["metadatas"])
+    stored_sources = {
+        meta["source"] for meta in results["metadatas"] if meta and "source" in meta
+    }
+
+    directory = _abs(directory)
+    kb_root = _abs(KNOWLEDGE_BASE_DIR)
+    wanted_suffixes = {ext.lower() for ext in file_types}
+
+    orphans = []
+    for source in sorted(stored_sources - live_sources):
+        if Path(source).suffix.lower() not in wanted_suffixes:
+            continue
+        # Where this source would live if it were still on disk
+        expected_path = kb_root / source
+        if expected_path.is_relative_to(directory) and not _exists_exact(expected_path):
+            orphans.append(source)
+
+    for source in orphans:
+        collection.delete(where={"source": source})
+        console.print(f"  [yellow]− pruned {source} (file no longer exists)[/yellow]")
+
+    return orphans
 
 
 def ingest_directory(
     directory: Path = None,
     file_types: list[str] = None,
+    prune: bool = True,
 ) -> dict:
     """
     Ingest all supported files from a directory into ChromaDB.
@@ -497,6 +590,8 @@ def ingest_directory(
         directory: Path to scan (defaults to knowledge_base/)
         file_types: List of extensions to include (e.g., [".md", ".pdf"])
                     Defaults to all supported types.
+        prune: Remove chunks for files under `directory` that no longer
+               exist on disk. See prune_orphaned_sources for scoping.
 
     Returns:
         Summary dict with counts of files processed and chunks created.
@@ -510,8 +605,10 @@ def ingest_directory(
     files.sort()
 
     if not files:
+        # Deliberately no pruning here: an empty (or mistyped) directory
+        # shouldn't silently wipe the collection. Use clear_collection() for that.
         console.print(f"[yellow]No supported files found in {directory}[/yellow]")
-        return {"files_processed": 0, "chunks_created": 0, "errors": []}
+        return {"files_processed": 0, "chunks_created": 0, "errors": [], "sources_pruned": []}
 
     console.print(f"\n[bold blue]Found {len(files)} file(s) to ingest[/bold blue]")
 
@@ -545,9 +642,16 @@ def ingest_directory(
             finally:
                 progress.advance(task)
 
+    pruned = []
+    if prune:
+        live_sources = {source_name_for(f) for f in files}
+        pruned = prune_orphaned_sources(collection, directory, file_types, live_sources)
+
     console.print(f"\n[bold green]Ingestion complete![/bold green]")
     console.print(f"  Files processed: {len(files)}")
     console.print(f"  Chunks created:  {total_chunks}")
+    if pruned:
+        console.print(f"  Sources pruned:  {len(pruned)}")
     console.print(f"  Collection size: {collection.count()} total chunks in DB")
     if errors:
         console.print(f"  [red]Errors: {len(errors)}[/red]")
@@ -557,6 +661,7 @@ def ingest_directory(
         "chunks_created": total_chunks,
         "collection_total": collection.count(),
         "errors": errors,
+        "sources_pruned": pruned,
     }
 
 
