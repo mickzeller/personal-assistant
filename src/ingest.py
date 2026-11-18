@@ -383,7 +383,9 @@ def get_chroma_collection() -> chromadb.Collection:
 def generate_chunk_id(source: str, chunk_index: int) -> str:
     """
     Deterministic ID (hash of source + index) so re-ingesting the same
-    file upserts instead of creating duplicates.
+    file upserts instead of creating duplicates. Note that this alone
+    can't remove chunks when a file shrinks; ingest_file handles that
+    by deleting the source's old chunks first.
     """
     raw = f"{source}::chunk_{chunk_index}"
     return hashlib.md5(raw.encode()).hexdigest()
@@ -400,6 +402,7 @@ def ingest_file(
 ) -> int:
     """
     Ingest one file: load → chunk → embed → store.
+    Re-ingesting a file replaces its previous chunks entirely.
     Returns the number of chunks created.
     """
     suffix = file_path.suffix.lower()
@@ -432,6 +435,12 @@ def ingest_file(
         source_name = file_path.name
     batch_size = 500  # well under ChromaDB's limit, keeps memory reasonable
     total = len(chunks)
+
+    # Replace, don't merge: drop every chunk from a previous ingest of this
+    # file. Chunk IDs are source + index, so upsert alone only overwrites
+    # indices that still exist. If a file shrinks from 10 chunks to 6, the
+    # old chunks 6-9 would otherwise linger with stale text and metadata.
+    collection.delete(where={"source": source_name})
 
     for batch_start in range(0, total, batch_size):
         batch_end = min(batch_start + batch_size, total)
