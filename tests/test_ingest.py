@@ -57,8 +57,8 @@ def _chunks_for(collection, source):
 # Re-ingest behavior (GitHub issue #2)
 # ──────────────────────────────────────────────────────────────
 
-def test_first_ingest_stores_all_chunks(tmp_path, collection):
-    note = tmp_path / "note.md"
+def test_first_ingest_stores_all_chunks(kb, collection):
+    note = kb / "note.md"
     _write_paragraphs(note, 6)
 
     n = ingest_file(note, collection, FakeEmbedder())
@@ -66,11 +66,12 @@ def test_first_ingest_stores_all_chunks(tmp_path, collection):
     assert n > 1
     assert collection.count() == n
     metas = _chunks_for(collection, "note.md")["metadatas"]
+    assert len(metas) == n
     assert all(m["total_chunks"] == n for m in metas)
 
 
-def test_reingesting_shorter_file_removes_stale_chunks(tmp_path, collection):
-    note = tmp_path / "note.md"
+def test_reingesting_shorter_file_removes_stale_chunks(kb, collection):
+    note = kb / "note.md"
     _write_paragraphs(note, 10)
     n_before = ingest_file(note, collection, FakeEmbedder())
 
@@ -89,9 +90,9 @@ def test_reingesting_shorter_file_removes_stale_chunks(tmp_path, collection):
     assert collection.get(ids=[stale_id])["ids"] == []
 
 
-def test_reingest_leaves_other_sources_alone(tmp_path, collection):
-    a = tmp_path / "a.md"
-    b = tmp_path / "b.md"
+def test_reingest_leaves_other_sources_alone(kb, collection):
+    a = kb / "a.md"
+    b = kb / "b.md"
     _write_paragraphs(a, 4)
     _write_paragraphs(b, 4)
     ingest_file(a, collection, FakeEmbedder())
@@ -104,8 +105,8 @@ def test_reingest_leaves_other_sources_alone(tmp_path, collection):
     assert len(_chunks_for(collection, "b.md")["ids"]) == n_b
 
 
-def test_reingest_same_content_is_idempotent(tmp_path, collection):
-    note = tmp_path / "note.md"
+def test_reingest_same_content_is_idempotent(kb, collection):
+    note = kb / "note.md"
     _write_paragraphs(note, 5)
     n1 = ingest_file(note, collection, FakeEmbedder())
     n2 = ingest_file(note, collection, FakeEmbedder())
@@ -114,8 +115,8 @@ def test_reingest_same_content_is_idempotent(tmp_path, collection):
     assert collection.count() == n1
 
 
-def test_file_that_became_empty_drops_its_chunks(tmp_path, collection):
-    note = tmp_path / "note.md"
+def test_file_that_became_empty_drops_its_chunks(kb, collection):
+    note = kb / "note.md"
     _write_paragraphs(note, 4)
     ingest_file(note, collection, FakeEmbedder())
 
@@ -126,8 +127,8 @@ def test_file_that_became_empty_drops_its_chunks(tmp_path, collection):
     assert collection.count() == 0
 
 
-def test_embedding_failure_keeps_previous_chunks(tmp_path, collection):
-    note = tmp_path / "note.md"
+def test_embedding_failure_keeps_previous_chunks(kb, collection):
+    note = kb / "note.md"
     _write_paragraphs(note, 4)
     n = ingest_file(note, collection, FakeEmbedder())
 
@@ -137,10 +138,10 @@ def test_embedding_failure_keeps_previous_chunks(tmp_path, collection):
     assert collection.count() == n
 
 
-def test_loader_failure_keeps_previous_chunks(tmp_path, collection, monkeypatch):
+def test_loader_failure_keeps_previous_chunks(kb, collection, monkeypatch):
     import src.ingest as ingest_module
 
-    note = tmp_path / "note.md"
+    note = kb / "note.md"
     _write_paragraphs(note, 4)
     n = ingest_file(note, collection, FakeEmbedder())
 
@@ -248,18 +249,62 @@ def test_prune_ignores_other_file_types(kb, collection):
     assert collection.count() == before
 
 
-def test_prune_never_touches_outside_directory_runs(kb, tmp_path_factory, collection):
-    """Files outside the knowledge base are stored by bare name and can't be located, so skip them."""
+def test_outside_files_get_absolute_source_names(kb, tmp_path_factory, collection):
+    """Same file name inside and outside the KB must not collide."""
+    external = tmp_path_factory.mktemp("external")
+    _write_paragraphs(kb / "report.md", 2)
+    _write_paragraphs(external / "report.md", 2)
+
+    assert source_name_for(kb / "report.md") == "report.md"
+    assert source_name_for(external / "report.md") == str(external / "report.md")
+
+    n_in = ingest_file(kb / "report.md", collection, FakeEmbedder())
+    n_out = ingest_file(external / "report.md", collection, FakeEmbedder())
+    assert collection.count() == n_in + n_out
+
+
+def test_prune_on_outside_directory_removes_its_own_orphans(kb, tmp_path_factory, collection):
+    external = tmp_path_factory.mktemp("external")
+    _write_paragraphs(external / "keep.md", 2)
+    _write_paragraphs(external / "gone.md", 2)
+    _ingest_all(external, collection)
+    n_keep = len(_chunks_for(collection, str(external / "keep.md"))["ids"])
+
+    (external / "gone.md").unlink()
+    live = _ingest_all(external, collection)
+    pruned = prune_orphaned_sources(collection, external, [".md"], live)
+
+    assert pruned == [str(external / "gone.md")]
+    assert collection.count() == n_keep
+
+
+def test_kb_run_never_prunes_outside_sources(kb, tmp_path_factory, collection):
     external = tmp_path_factory.mktemp("external")
     _write_paragraphs(external / "ext.md", 2)
     ingest_file(external / "ext.md", collection, FakeEmbedder())
     before = collection.count()
 
     (external / "ext.md").unlink()
-    pruned = prune_orphaned_sources(collection, external, [".md"], set())
+    # Even though the file is gone, it is outside the KB so a KB run leaves it alone
+    pruned = prune_orphaned_sources(collection, kb, [".md"], set())
 
     assert pruned == []
     assert collection.count() == before
+
+
+def test_kb_run_cleans_up_legacy_bare_name_outside_sources(kb, collection):
+    """Chunks stored under a bare name with no matching KB file are stale leftovers from before absolute naming."""
+    collection.upsert(
+        ids=["legacy-0"],
+        documents=["old text"],
+        embeddings=[[1.0, 0.0, 0.0]],
+        metadatas=[{"source": "ext.md", "chunk_index": 0, "total_chunks": 1}],
+    )
+
+    pruned = prune_orphaned_sources(collection, kb, [".md"], set())
+
+    assert pruned == ["ext.md"]
+    assert collection.count() == 0
 
 
 def test_prune_on_empty_collection_is_noop(kb, collection):

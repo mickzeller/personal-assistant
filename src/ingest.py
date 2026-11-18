@@ -383,18 +383,26 @@ def get_chroma_collection() -> chromadb.Collection:
 
 def source_name_for(file_path: Path) -> str:
     """
-    The "source" stored in chunk metadata. Relative to knowledge_base/ when
-    the file lives there, otherwise just the file name. This is the key that
-    ties chunks back to a file for replace-on-reingest and orphan pruning.
+    The "source" stored in chunk metadata. This is the key that ties chunks
+    back to a file for replace-on-reingest and orphan pruning, so it has to
+    be unambiguous:
+
+      knowledge_base/notes/a.md  ->  "notes/a.md"   (relative, easy to read)
+      ~/Downloads/a.md           ->  "/Users/you/Downloads/a.md"  (absolute)
+
+    A bare file name for outside files would collide with a top-level
+    knowledge_base/ file of the same name and leave pruning unable to tell
+    which one a chunk belongs to.
 
     Uses abspath rather than resolve() on purpose: a symlinked folder inside
     knowledge_base/ should keep its knowledge_base-relative name, otherwise
-    its files look like outside files and orphan pruning can't locate them.
+    its files look like outside files.
     """
+    path = _abs(file_path)
     try:
-        return str(_abs(file_path).relative_to(_abs(KNOWLEDGE_BASE_DIR)))
+        return str(path.relative_to(_abs(KNOWLEDGE_BASE_DIR)))
     except ValueError:
-        return file_path.name
+        return str(path)
 
 
 def _abs(path: Path) -> Path:
@@ -535,14 +543,14 @@ def prune_orphaned_sources(
     Scoping matters: ingest_directory can run on a subdirectory or a subset
     of file types, and a source that simply wasn't part of this run is not
     an orphan. A stored source is only a prune candidate when its suffix is
-    in file_types AND knowledge_base/<source> falls under `directory`.
+    in file_types AND its on-disk location falls under `directory`. Relative
+    sources live under knowledge_base/; absolute sources (files ingested from
+    elsewhere) are taken as-is. See source_name_for.
 
-    Known limitation: files ingested from outside knowledge_base/ are stored
-    by bare file name, which is indistinguishable from a top-level file in
-    knowledge_base/. Runs on an outside directory therefore never prune, and
-    a knowledge_base/ run will prune an outside-ingested bare name that has
-    no matching top-level file. Keep ad-hoc ingests inside knowledge_base/
-    (or pass --no-prune) to avoid that.
+    Chunks written before absolute naming existed (outside files stored by
+    bare name) get cleaned up by a knowledge_base/ run if no top-level file
+    of that name exists, which is the correct outcome: re-ingesting the
+    outside file stores it under its absolute path.
 
     Returns the list of source names that were removed.
     """
@@ -564,7 +572,7 @@ def prune_orphaned_sources(
         if Path(source).suffix.lower() not in wanted_suffixes:
             continue
         # Where this source would live if it were still on disk
-        expected_path = kb_root / source
+        expected_path = Path(source) if Path(source).is_absolute() else kb_root / source
         if expected_path.is_relative_to(directory) and not _exists_exact(expected_path):
             orphans.append(source)
 

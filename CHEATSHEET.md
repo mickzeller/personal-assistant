@@ -53,6 +53,8 @@ python cli.py ingest --no-prune   # keep chunks for files deleted/renamed on dis
 Re-ingesting is a replace: a file's old chunks are swapped for the new ones,
 and chunks for files that no longer exist under the ingested directory get
 pruned. Point `--dir` at a subfolder to limit both ingest and pruning to it.
+Files inside `knowledge_base/` are stored by relative path; files ingested from
+anywhere else are stored by absolute path, so same-named files never collide.
 
 ### Supported file types
 `.md` `.txt` `.pdf` `.json` `.jsonl` `.docx`
